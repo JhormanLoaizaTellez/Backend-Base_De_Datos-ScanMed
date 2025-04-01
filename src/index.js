@@ -147,12 +147,14 @@ app.post("/api/registro", async (req, res) => {
       [correo, numero_documento]
     );
 
-    if (userExists.length > 0) {
-      return res.status(400).json({
-        success: false,
-        message: "El correo o documento ya están registrados"
-      });
-    }
+   // En tu ruta de registro (/api/registro)
+if (userExists.length > 0) {
+  return res.status(400).json({
+    success: false,
+    message: "El correo o documento ya están registrados",
+    userExists: true // Añade esta propiedad para identificar este caso específico
+  });
+}
 
     // Encriptar la contraseña
     const hashedPassword = await bcrypt.hash(contrasena, 10);
