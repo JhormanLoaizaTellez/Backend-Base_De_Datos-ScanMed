@@ -201,8 +201,41 @@ app.post("/api/registro", async (req, res) => {
   }
 });
 
+app.post('/api/login', async (req, res) => {
+  try {
+    const { correo, contrasena } = req.body;
+
+    if (!correo || !contrasena) {
+      return res.status(400).json({ success: false, message: "Todos los campos son obligatorios." });
+    }
+
+    const [users] = await pool.query("SELECT * FROM Usuarios WHERE Correo_Electronico = ?", [correo]);
+
+    if (users.length === 0) {
+      return res.status(401).json({ success: false, message: "Usuario no encontrado." });
+    }
+
+    const usuario = users[0];
+
+    const match = await bcrypt.compare(contrasena, usuario.Contrasena);
+
+    if (!match) {
+      return res.status(401).json({ success: false, message: "Contraseña incorrecta." });
+    }
+
+    // Generar JWT
+    const token = jwt.sign({ id: usuario.ID_USUARIO, correo: usuario.Correo_Electronico }, 'secreto', { expiresIn: '1h' });
+
+    res.status(200).json({ success: true, message: "Inicio de sesión exitoso", token });
+  } catch (error) {
+    console.error("Error en /api/login:", error);
+    res.status(500).json({ success: false, message: "Error en el servidor", error: error.message });
+  }
+});
+
 // Manejo de errores mejorado
 app.use((req, res, next) => {
+  console.error("Ruta no encontrada:", req.originalUrl); // Agrega este log
   res.status(404).json({ success: false, message: "Ruta no encontrada" });
 });
 
@@ -220,3 +253,5 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
+
+
