@@ -225,15 +225,32 @@ app.post('/api/login', async (req, res) => {
       return res.status(401).json({ success: false, message: "Contraseña incorrecta." });
     }
 
-    // Generar JWT
-    const token = jwt.sign({ id: usuario.ID_USUARIO, correo: usuario.Correo_Electronico }, 'secreto', { expiresIn: '1h' });
+    // Verifica si el usuario es médico
+    const [medicoResult] = await pool.query(
+      "SELECT * FROM Medicos WHERE ID_USUARIO = ?",
+      [usuario.ID_USUARIO]
+    );
 
-    res.status(200).json({ success: true, message: "Inicio de sesión exitoso", token });
+    const esMedico = medicoResult.length > 0;
+
+    const token = jwt.sign(
+      { id: usuario.ID_USUARIO, correo: usuario.Correo_Electronico, rol: esMedico ? "MEDICO" : "PACIENTE" },
+      'secreto',
+      { expiresIn: '1h' }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "Inicio de sesión exitoso",
+      token,
+      rol: esMedico ? "MEDICO" : "PACIENTE"
+    });
   } catch (error) {
     console.error("Error en /api/login:", error);
     res.status(500).json({ success: false, message: "Error en el servidor", error: error.message });
   }
 });
+
 
 // Manejo de errores mejorado
 app.use((req, res, next) => {
