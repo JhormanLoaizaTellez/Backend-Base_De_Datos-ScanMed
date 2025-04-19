@@ -251,6 +251,386 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+// Obtener todos los servicios disponibles 
+app.get("/api/servicios", async (req, res) => {
+  let connection;
+  try {
+  connection = await pool.getConnection();
+  await connection.beginTransaction();
+    
+    // Verificar conexión a la base de datos
+    await connection.ping();
+    console.log("✅ Conexión a MySQL verificada");
+    
+    // Consulta con manejo explícito de errores
+    const [servicios] = await connection.query(`
+      SELECT ID_SERVICIO as id, Nombre as nombre 
+      FROM Servicios 
+      ORDER BY Nombre
+    `);
+    
+    console.log(`📊 Resultados encontrados: ${servicios.length}`);
+    
+    if (!servicios || servicios.length === 0) {
+      console.warn("⚠️ No se encontraron servicios en la base de datos");
+      return res.status(404).json({ 
+        success: false, 
+        message: "No se encontraron servicios disponibles",
+        details: "La tabla Servicios está vacía"
+      });
+    }
+    
+    console.log("✅ Servicios obtenidos correctamente");
+    res.json({ 
+      success: true, 
+      data: servicios,
+      message: "Servicios obtenidos correctamente"
+    });
+  } catch (error) {
+    console.error("❌ Error en /api/servicios:", {
+      message: error.message,
+      sqlMessage: error.sqlMessage,
+      stack: error.stack
+    });
+    
+    res.status(500).json({ 
+      success: false, 
+      message: "Error interno al obtener servicios",
+      error: error.message,
+      sqlError: error.sqlMessage || "N/A"
+    });
+  } finally {
+    if (connection) {
+      console.log("🔌 Liberando conexión a la base de datos");
+      connection.release();
+    }
+  }
+});
+// Obtener médicos por servicio (versión mejorada)
+app.get("/api/medicos/servicio/:idServicio", async (req, res) => {
+  let connection;
+  try {
+    const { idServicio } = req.params;
+    
+    if (!idServicio || isNaN(idServicio)) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "ID de servicio no válido" 
+      });
+    }
+    
+    connection = await pool.getConnection();
+    const [medicos] = await connection.query(`
+      SELECT 
+        m.ID_MEDICO, 
+        u.Primer_Nombre, 
+        u.Segundo_Nombre,
+        u.Primer_Apellido, 
+        u.Segundo_Apellido,
+        s.Nombre as Especialidad
+      FROM Medicos m
+      JOIN Usuarios u ON m.ID_USUARIO = u.ID_USUARIO
+      JOIN Servicios s ON m.ID_SERVICIO = s.ID_SERVICIO
+      WHERE m.ID_SERVICIO = ?
+      ORDER BY u.Primer_Apellido, u.Primer_Nombre
+    `, [idServicio]);
+    
+    if (medicos.length === 0) {
+      return res.status(200).json({ 
+        success: true, 
+        data: [],
+        message: "No hay médicos disponibles para este servicio en este momento" 
+      });
+    }
+    
+    res.json({ 
+      success: true, 
+      data: medicos,
+      message: "Médicos obtenidos correctamente"
+    });
+  } catch (error) {
+    console.error("Error en /api/medicos/servicio:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Error interno al obtener médicos",
+      error: error.message 
+    });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+// Obtener disponibilidad de un médico
+app.get("/api/disponibilidad/:idMedico", async (req, res) => {
+  try {
+    const { idMedico } = req.params;
+    
+    // Validar ID
+    if (!idMedico || isNaN(idMedico)) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "ID de médico no válido" 
+      });
+    }
+
+    // Obtener citas existentes del médico
+    const [citas] = await pool.query(`
+      SELECT Fecha_Hora 
+      FROM Citas 
+      WHERE ID_MEDICO = ? 
+      AND ID_ESTADO IN (1, 2) /* Programada o Confirmada */
+      AND DATE(Fecha_Hora) >= CURDATE()
+    `, [idMedico]);
+
+    // Generar disponibilidad para las próximas 2 semanas
+    const disponibilidad = generarDisponibilidad(citas);
+    
+    res.json({ 
+      success: true, 
+      data: disponibilidad,
+      message: "Disponibilidad obtenida correctamente"
+    });
+  } catch (error) {
+    console.error("Error en /api/disponibilidad:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Error al obtener disponibilidad",
+      error: error.message 
+    });
+  }
+});
+
+// Función para generar horarios disponibles
+function generarDisponibilidad(citasExistentes) {
+  const diasLaborales = [1, 2, 3, 4, 5]; // Lunes(1) a Viernes(5)
+  const horarios = [];
+  const hoy = new Date();
+  
+  // Convertir citas existentes a formato comparable
+  const citasOcupadas = citasExistentes.map(c => {
+    const fecha = new Date(c.Fecha_Hora);
+    return {
+      fecha: fecha.toISOString().split('T')[0],
+      hora: fecha.getHours().toString().padStart(2, '0') + ':' + 
+            fecha.getMinutes().toString().padStart(2, '0')
+    };
+  });
+
+  // Generar disponibilidad para los próximos 14 días
+  for (let i = 0; i < 14; i++) {
+    const fecha = new Date(hoy);
+    fecha.setDate(hoy.getDate() + i);
+    
+    // Solo días laborales
+    if (diasLaborales.includes(fecha.getDay())) {
+      const fechaStr = fecha.toISOString().split('T')[0];
+      
+      // Horario de mañana (7am - 12pm)
+      for (let h = 7; h < 12; h++) {
+        const horaStr = h.toString().padStart(2, '0') + ':00';
+        
+        // Verificar si el horario está ocupado
+        if (!citasOcupadas.some(c => 
+          c.fecha === fechaStr && c.hora === horaStr)) {
+          horarios.push({
+            fecha: fechaStr,
+            hora: horaStr,
+            disponible: true
+          });
+        }
+      }
+      
+      // Horario de tarde (2pm - 6pm)
+      for (let h = 14; h < 18; h++) {
+        const horaStr = h.toString().padStart(2, '0') + ':00';
+        
+        if (!citasOcupadas.some(c => 
+          c.fecha === fechaStr && c.hora === horaStr)) {
+          horarios.push({
+            fecha: fechaStr,
+            hora: horaStr,
+            disponible: true
+          });
+        }
+      }
+    }
+  }
+  
+  return horarios;
+}
+
+// Crear nueva cita
+// Crear nueva cita - Versión corregida
+app.post("/api/citas", async (req, res) => {
+  let connection;
+  try {
+    const { 
+      nombre, apellidos, documento, correo,
+      servicioId, doctorId, fecha, hora
+    } = req.body;
+
+    // Validaciones
+    if (!nombre || !apellidos || !documento || !correo || 
+        !servicioId || !doctorId || !fecha || !hora) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Todos los campos son obligatorios" 
+      });
+    }
+
+    // Formatear hora
+    let horaFormateada = hora.includes(':') ? hora : `${hora}:00`;
+    if (horaFormateada.split(':')[1].length === 1) {
+      horaFormateada = horaFormateada.replace(/:(\d)$/, ':0$1');
+    }
+
+    const fechaHora = new Date(`${fecha}T${horaFormateada}`);
+    if (isNaN(fechaHora.getTime())) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Fecha u hora no válidas" 
+      });
+    }
+    const fechaHoraStr = fechaHora.toISOString().slice(0, 19).replace('T', ' ');
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    try {
+      // 1. Verificar que el usuario existe
+      const [usuario] = await connection.query(
+        `SELECT ID_USUARIO FROM Usuarios WHERE Num_Documento = ? LIMIT 1`,
+        [documento]
+      );
+  
+      if (usuario.length === 0) {
+        return res.status(404).json({ 
+          success: false, 
+          message: "Usuario no registrado. Por favor complete su registro primero."
+        });
+      }
+  
+      // 2. Verificar que el correo coincide con el usuario
+      const [usuarioCorreo] = await connection.query(
+        `SELECT ID_USUARIO FROM Usuarios WHERE Num_Documento = ? AND Correo_Electronico = ? LIMIT 1`,
+        [documento, correo]
+      );
+  
+      if (usuarioCorreo.length === 0) {
+        return res.status(400).json({ 
+          success: false, 
+          message: "El correo no coincide con el usuario registrado."
+        });
+      }
+
+      // 3. Buscar o crear registro en Pacientes
+      const [paciente] = await connection.query(
+        `SELECT ID_PACIENTE FROM Pacientes WHERE ID_USUARIO = ? LIMIT 1`,
+        [usuario[0].ID_USUARIO]
+      );
+  
+      let idPaciente;
+      if (paciente.length > 0) {
+        idPaciente = paciente[0].ID_PACIENTE;
+      } else {
+        // Solo crea el registro en Pacientes (no en Usuarios)
+        const [nuevoPaciente] = await connection.query(
+          `INSERT INTO Pacientes (ID_USUARIO) VALUES (?)`,
+          [usuario[0].ID_USUARIO]
+        );
+        idPaciente = nuevoPaciente.insertId;
+      }
+
+      // 4. Verificar disponibilidad del horario
+      const [citaExistente] = await connection.query(
+        `SELECT ID_CITA FROM Citas 
+         WHERE ID_MEDICO = ? 
+         AND Fecha_Hora = ?
+         AND ID_ESTADO IN (1, 2)
+         LIMIT 1`,
+        [doctorId, fechaHoraStr]
+      );
+
+      if (citaExistente.length > 0) {
+        throw new Error("El horario seleccionado ya está reservado");
+      }
+
+      // 5. Crear la cita
+      const [nuevaCita] = await connection.query(
+        `INSERT INTO Citas (
+          ID_ESTADO, ID_PACIENTE, ID_MEDICO, ID_ASISTENCIA, Fecha_Hora
+        ) VALUES (?, ?, ?, ?, ?)`,
+        [2, idPaciente, doctorId, 1, fechaHoraStr]
+      );
+
+      // 6. Crear registro en Historial_Consultas
+      await connection.query(
+        `INSERT INTO Historial_Consultas (
+          ID_PACIENTE, ID_MEDICO, ID_CITA, Diagnostico
+        ) VALUES (?, ?, ?, ?)`,
+        [idPaciente, doctorId, nuevaCita.insertId, "Cita programada - Pendiente de atención"]
+      );
+
+      // Obtener detalles para la respuesta
+      const [medico] = await connection.query(
+        `SELECT u.Primer_Nombre, u.Primer_Apellido 
+         FROM Medicos m
+         JOIN Usuarios u ON m.ID_USUARIO = u.ID_USUARIO
+         WHERE m.ID_MEDICO = ?`,
+        [doctorId]
+      );
+
+      const [servicio] = await connection.query(
+        `SELECT Nombre FROM Servicios WHERE ID_SERVICIO = ?`,
+        [servicioId]
+      );
+
+      await connection.commit();
+
+      return res.json({ 
+        success: true, 
+        message: "Cita reservada exitosamente",
+        data: {
+          citaId: nuevaCita.insertId,
+          fecha: fecha,
+          hora: horaFormateada,
+          paciente: `${nombre} ${apellidos}`,
+          medico: `${medico[0].Primer_Nombre} ${medico[0].Primer_Apellido}`,
+          servicio: servicio[0].Nombre
+        }
+      });
+
+    } catch (error) {
+      await connection.rollback();
+      console.error("Error en la transacción:", error);
+      throw error;
+    }
+  } catch (error) {
+    console.error("Error en /api/citas:", error);
+    return res.status(500).json({ 
+      success: false, 
+      message: error.message || "Error al procesar la reserva"
+    });
+  } finally {
+    if (connection) {
+      connection.release();
+    }
+  }
+});
+
+// Manejo de errores y rutas no encontradas (DEBE IR AL FINAL)
+app.use((req, res, next) => {
+  console.error("Ruta no encontrada:", req.originalUrl);
+  res.status(404).json({ success: false, message: "Ruta no encontrada" });
+});
+
+app.use((err, req, res, next) => {
+  console.error("Error global:", err.stack);
+  res.status(500).json({ 
+    success: false, 
+    message: "Error interno del servidor",
+    error: process.env.NODE_ENV === 'development' ? err.message : undefined
+  });
+});
 
 // Manejo de errores mejorado
 app.use((req, res, next) => {
