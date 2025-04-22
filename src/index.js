@@ -239,11 +239,13 @@ app.post('/api/login', async (req, res) => {
       { expiresIn: '1h' }
     );
 
+    const { Contrasena, ...userSinPass } = usuario;
     res.status(200).json({
       success: true,
-      message: "Inicio de sesión exitoso",
       token,
-      rol: esMedico ? "MEDICO" : "PACIENTE"
+      usuario: userSinPass,      // <— aquí
+      userId: usuario.ID_USUARIO,
+      role: esMedico ? "MEDICO" : "PACIENTE"
     });
   } catch (error) {
     console.error("Error en /api/login:", error);
@@ -617,6 +619,52 @@ app.post("/api/citas", async (req, res) => {
   }
 });
 
+// Reemplaza o añade este endpoint ANTES de tus middlewares de 404:
+app.get("/historial/:idUsuario", async (req, res) => {
+  const { idUsuario } = req.params;
+  try {
+    const [rows] = await pool.query(`
+      SELECT 
+        c.ID_CITA,
+        CONCAT(u_m.Primer_Nombre, ' ', u_m.Primer_Apellido) AS Nombre_Medico,
+        CONCAT(u_p.Primer_Nombre, ' ', u_p.Primer_Apellido) AS Nombre_Paciente,
+        c.Fecha_Hora,
+        h.Diagnostico
+      FROM Historial_Consultas h
+      JOIN Citas c      ON h.ID_CITA    = c.ID_CITA
+      JOIN Medicos m    ON h.ID_MEDICO  = m.ID_MEDICO
+      JOIN Usuarios u_m ON m.ID_USUARIO = u_m.ID_USUARIO
+      JOIN Pacientes p  ON h.ID_PACIENTE= p.ID_PACIENTE
+      JOIN Usuarios u_p ON p.ID_USUARIO = u_p.ID_USUARIO
+      WHERE p.ID_USUARIO = ?
+      ORDER BY c.Fecha_Hora DESC
+    `, [idUsuario]);
+
+    return res.json(rows);
+  } catch (err) {
+    console.error("Error en GET /historial/:idUsuario:", err);
+    return res.status(500).json({ success: false, message: "Error al obtener el historial" });
+  }
+});
+
+
+
+
+
+app.get('/pacientes/:idUsuario', async (req, res) => {
+  const { idUsuario } = req.params;
+  try {
+    const paciente = await db.query('SELECT ID_PACIENTE FROM pacientes WHERE ID_USUARIO = ?', [idUsuario]);
+    if (paciente.length === 0) {
+      return res.status(404).json({ message: 'Paciente no encontrado' });
+    }
+    res.json(paciente[0]);
+  } catch (error) {
+    console.error('Error al obtener paciente:', error);
+    res.status(500).json({ message: 'Error en el servidor' });
+  }
+});
+
 // Manejo de errores y rutas no encontradas (DEBE IR AL FINAL)
 app.use((req, res, next) => {
   console.error("Ruta no encontrada:", req.originalUrl);
@@ -652,5 +700,8 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
+
+
+
 
 
