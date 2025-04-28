@@ -5,9 +5,12 @@ const mysql = require("mysql2/promise");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 require("dotenv").config();
+require('./recordatorios');  // Asegúrate de usar la ruta correcta
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+
+
 
 // Configuración mejorada de CORS
 app.use(cors({
@@ -402,56 +405,68 @@ app.get("/api/disponibilidad/:idMedico", async (req, res) => {
 });
 
 // Función para generar horarios disponibles
+// Función para generar horarios disponibles (versión corregida)
 function generarDisponibilidad(citasExistentes) {
   const diasLaborales = [1, 2, 3, 4, 5]; // Lunes(1) a Viernes(5)
   const horarios = [];
   const hoy = new Date();
   
-  // Convertir citas existentes a formato comparable
+  // Ajustar hora local sin tiempo (para comparación exacta)
+  hoy.setHours(0, 0, 0, 0);
+  
+  // Convertir citas existentes a formato comparable (manejo de zona horaria)
   const citasOcupadas = citasExistentes.map(c => {
     const fecha = new Date(c.Fecha_Hora);
+    // Ajustar a fecha local sin zona horaria
+    const fechaLocal = new Date(fecha.getTime() - fecha.getTimezoneOffset() * 60000);
     return {
-      fecha: fecha.toISOString().split('T')[0],
-      hora: fecha.getHours().toString().padStart(2, '0') + ':' + 
-            fecha.getMinutes().toString().padStart(2, '0')
+      fecha: fechaLocal.toISOString().split('T')[0],
+      hora: fechaLocal.getHours().toString().padStart(2, '0') + ':00'
     };
   });
 
-  // Generar disponibilidad para los próximos 14 días
+  // Generar disponibilidad para los próximos 14 días (incluyendo hoy si es día laboral)
   for (let i = 0; i < 14; i++) {
     const fecha = new Date(hoy);
     fecha.setDate(hoy.getDate() + i);
     
-    // Solo días laborales
     if (diasLaborales.includes(fecha.getDay())) {
       const fechaStr = fecha.toISOString().split('T')[0];
       
-      // Horario de mañana (7am - 12pm)
+      // Horario de mañana (7-11)
       for (let h = 7; h < 12; h++) {
-        const horaStr = h.toString().padStart(2, '0') + ':00';
+        const horaActual = new Date(fecha);
+        horaActual.setHours(h, 0, 0, 0);
         
-        // Verificar si el horario está ocupado
-        if (!citasOcupadas.some(c => 
-          c.fecha === fechaStr && c.hora === horaStr)) {
-          horarios.push({
-            fecha: fechaStr,
-            hora: horaStr,
-            disponible: true
-          });
+        // Solo agregar horarios futuros (incluyendo el momento actual)
+        if (horaActual >= new Date()) {
+          const horaStr = h.toString().padStart(2, '0') + ':00';
+          
+          if (!citasOcupadas.some(c => c.fecha === fechaStr && c.hora === horaStr)) {
+            horarios.push({
+              fecha: fechaStr,
+              hora: horaStr,
+              disponible: true
+            });
+          }
         }
       }
       
-      // Horario de tarde (2pm - 6pm)
+      // Horario de tarde (14-17)
       for (let h = 14; h < 18; h++) {
-        const horaStr = h.toString().padStart(2, '0') + ':00';
+        const horaActual = new Date(fecha);
+        horaActual.setHours(h, 0, 0, 0);
         
-        if (!citasOcupadas.some(c => 
-          c.fecha === fechaStr && c.hora === horaStr)) {
-          horarios.push({
-            fecha: fechaStr,
-            hora: horaStr,
-            disponible: true
-          });
+        if (horaActual >= new Date()) {
+          const horaStr = h.toString().padStart(2, '0') + ':00';
+          
+          if (!citasOcupadas.some(c => c.fecha === fechaStr && c.hora === horaStr)) {
+            horarios.push({
+              fecha: fechaStr,
+              hora: horaStr,
+              disponible: true
+            });
+          }
         }
       }
     }
@@ -479,20 +494,17 @@ app.post("/api/citas", async (req, res) => {
       });
     }
 
-    // Formatear hora
-    let horaFormateada = hora.includes(':') ? hora : `${hora}:00`;
-    if (horaFormateada.split(':')[1].length === 1) {
-      horaFormateada = horaFormateada.replace(/:(\d)$/, ':0$1');
-    }
+// Formatear hora con seguridad
+let [h, m] = hora.split(':');
+h = h.padStart(2, '0');
+m = (m || '00').padStart(2, '0');
+const horaFormateada = `${h}:${m}`;
 
-    const fechaHora = new Date(`${fecha}T${horaFormateada}`);
-    if (isNaN(fechaHora.getTime())) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Fecha u hora no válidas" 
-      });
-    }
-    const fechaHoraStr = fechaHora.toISOString().slice(0, 19).replace('T', ' ');
+const fechaSolo = fecha.split(' ')[0];
+
+
+const fechaHoraStr = `${fechaSolo} ${horaFormateada}:00`;
+
 
     connection = await pool.getConnection();
     await connection.beginTransaction();
