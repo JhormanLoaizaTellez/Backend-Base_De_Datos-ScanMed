@@ -206,53 +206,87 @@ if (userExists.length > 0) {
   }
 });
 
-app.post('/api/login', async (req, res) => {
+app.post("/api/login", async (req, res) => {
   try {
     const { correo, contrasena } = req.body;
-
     if (!correo || !contrasena) {
-      return res.status(400).json({ success: false, message: "Todos los campos son obligatorios." });
+      return res.status(400).json({
+        success: false,
+        message: "Todos los campos son obligatorios.",
+      });
     }
 
-    const [users] = await pool.query("SELECT * FROM Usuarios WHERE Correo_Electronico = ?", [correo]);
-
+    // 1) Buscar usuario
+    const [users] = await pool.query(
+      "SELECT * FROM usuarios WHERE Correo_Electronico = ?",
+      [correo]
+    );
     if (users.length === 0) {
-      return res.status(401).json({ success: false, message: "Usuario no encontrado." });
+      return res
+        .status(401)
+        .json({ success: false, message: "Usuario no encontrado." });
     }
-
     const usuario = users[0];
 
+    // 2) Validar contraseña
     const match = await bcrypt.compare(contrasena, usuario.Contrasena);
-
     if (!match) {
-      return res.status(401).json({ success: false, message: "Contraseña incorrecta." });
+      return res
+        .status(401)
+        .json({ success: false, message: "Contraseña incorrecta." });
     }
 
-    // Verifica si el usuario es médico
-    const [medicoResult] = await pool.query(
-      "SELECT * FROM Medicos WHERE ID_USUARIO = ?",
+    // 3) Verificar si es médico y traer datos de medicos + especialidad
+    const [medRows] = await pool.query(
+      `SELECT 
+         m.ID_MEDICO      AS medicoId,
+         e.ID_SERVICIO AS especialidadId,
+         e.Nombre         AS especialidadNombre
+       FROM medicos m
+       JOIN servicios e 
+         ON m.ID_SERVICIO = e.ID_SERVICIO
+       WHERE m.ID_USUARIO = ?`,
       [usuario.ID_USUARIO]
     );
 
-    const esMedico = medicoResult.length > 0;
+    const esMedico = medRows.length > 0;
 
+    // 4) Generar token
     const token = jwt.sign(
-      { id: usuario.ID_USUARIO, correo: usuario.Correo_Electronico, rol: esMedico ? "MEDICO" : "PACIENTE" },
-      'secreto',
-      { expiresIn: '1h' }
+      {
+        id: usuario.ID_USUARIO,
+        correo: usuario.Correo_Electronico,
+        rol: esMedico ? "MEDICO" : "PACIENTE",
+      },
+      "secreto",
+      { expiresIn: "1h" }
     );
 
+    // 5) Formar la respuesta
     const { Contrasena, ...userSinPass } = usuario;
-    res.status(200).json({
+    const payload = {
       success: true,
       token,
-      usuario: userSinPass,      // <— aquí
-      userId: usuario.ID_USUARIO,
-      role: esMedico ? "MEDICO" : "PACIENTE"
-    });
+      usuario: userSinPass,
+      role: esMedico ? "MEDICO" : "PACIENTE",
+    };
+
+    if (esMedico) {
+      payload.medico = {
+        medicoId: medRows[0].medicoId,
+        nombre: `${userSinPass.Primer_Nombre} ${userSinPass.Primer_Apellido}`,
+        especialidad: medRows[0].especialidadNombre,
+      };
+    }
+
+    return res.status(200).json(payload);
   } catch (error) {
     console.error("Error en /api/login:", error);
-    res.status(500).json({ success: false, message: "Error en el servidor", error: error.message });
+    return res.status(500).json({
+      success: false,
+      message: "Error en el servidor",
+      error: error.message,
+    });
   }
 });
 
@@ -311,6 +345,46 @@ app.get("/api/servicios", async (req, res) => {
     }
   }
 });
+
+
+app.get("/api/citas/medico/:idMedico", async (req, res) => {
+  try {
+    const { idMedico } = req.params;
+    if (!idMedico || isNaN(idMedico)) {
+      return res.status(400).json({
+        success: false,
+        message: "ID de médico no válido",
+      });
+    }
+
+    const [rows] = await pool.query(
+      `
+      SELECT
+        c.ID_CITA                                        AS id,
+        c.Fecha_Hora                                     AS fecha,
+        est.tipo_estado                                  AS estado,
+        CONCAT(u.Primer_Nombre, ' ', u.Primer_Apellido)  AS pacienteNombre
+      FROM citas c
+      JOIN estado est   ON c.ID_ESTADO   = est.ID_ESTADO
+      JOIN pacientes p   ON c.ID_PACIENTE = p.ID_PACIENTE
+      JOIN usuarios u    ON p.ID_USUARIO  = u.ID_USUARIO
+      WHERE c.ID_MEDICO = ?
+      ORDER BY c.Fecha_Hora
+      `,
+      [idMedico]
+    );
+
+    return res.json({ success: true, data: rows });
+  } catch (err) {
+    console.error("Error en /api/citas/medico/:idMedico →", err);
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+});
+
+
 // Obtener médicos por servicio (versión mejorada)
 app.get("/api/medicos/servicio/:idServicio", async (req, res) => {
   let connection;
@@ -368,38 +442,41 @@ app.get("/api/medicos/servicio/:idServicio", async (req, res) => {
 app.get("/api/disponibilidad/:idMedico", async (req, res) => {
   try {
     const { idMedico } = req.params;
-    
+
     // Validar ID
     if (!idMedico || isNaN(idMedico)) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "ID de médico no válido" 
+      return res.status(400).json({
+        success: false,
+        message: "ID de médico no válido",
       });
     }
 
     // Obtener citas existentes del médico
-    const [citas] = await pool.query(`
+    const [citas] = await pool.query(
+      `
       SELECT Fecha_Hora 
-      FROM Citas 
+      FROM citas 
       WHERE ID_MEDICO = ? 
       AND ID_ESTADO IN (1, 2) /* Programada o Confirmada */
       AND DATE(Fecha_Hora) >= CURDATE()
-    `, [idMedico]);
+    `,
+      [idMedico]
+    );
 
     // Generar disponibilidad para las próximas 2 semanas
     const disponibilidad = generarDisponibilidad(citas);
-    
-    res.json({ 
-      success: true, 
+
+    res.json({
+      success: true,
       data: disponibilidad,
-      message: "Disponibilidad obtenida correctamente"
+      message: "Disponibilidad obtenida correctamente",
     });
   } catch (error) {
     console.error("Error en /api/disponibilidad:", error);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: "Error al obtener disponibilidad",
-      error: error.message 
+      error: error.message,
     });
   }
 });
@@ -712,7 +789,6 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
-
 
 
 
