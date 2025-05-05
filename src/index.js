@@ -235,6 +235,15 @@ app.post('/api/login', async (req, res) => {
     );
 
     const esMedico = medicoResult.length > 0;
+    if (esMedico && usuario.Tipo_Usuario !== "MEDICO") {
+      return res.status(400).json({
+        success: false,
+        message: "Inconsistencia en el rol del usuario."
+      });
+    }
+
+    const medico = esMedico ? medicoResult[0] : null; // 👈 Obtiene el primer registro médico
+
 
     const token = jwt.sign(
       { id: usuario.ID_USUARIO, correo: usuario.Correo_Electronico, rol: esMedico ? "MEDICO" : "PACIENTE" },
@@ -246,15 +255,50 @@ app.post('/api/login', async (req, res) => {
     res.status(200).json({
       success: true,
       token,
-      usuario: userSinPass,      // <— aquí
+      usuario: userSinPass,
       userId: usuario.ID_USUARIO,
-      role: esMedico ? "MEDICO" : "PACIENTE"
+      role: esMedico ? "MEDICO" : "PACIENTE",
+      medico: esMedico ? medico : null // 👈 Incluye datos del médico
     });
+
   } catch (error) {
     console.error("Error en /api/login:", error);
     res.status(500).json({ success: false, message: "Error en el servidor", error: error.message });
   }
 });
+
+// En tu archivo de rutas del backend (ej: server.js)
+app.get("/api/citas/medico/:medicoId", async (req, res) => {
+  try {
+    const { medicoId } = req.params;
+    const [citas] = await pool.query(`
+      SELECT
+        c.ID_CITA        AS id,
+        c.Fecha_Hora     AS fecha,
+        c.ID_ESTADO      AS estadoId,
+        c.ID_PACIENTE,
+        u.Primer_Nombre  AS pacienteNombre,
+        s.Nombre         AS examen
+      FROM citas c
+      LEFT JOIN pacientes p ON c.ID_PACIENTE = p.ID_PACIENTE
+      LEFT JOIN usuarios u ON p.ID_USUARIO = u.ID_USUARIO
+      LEFT JOIN servicios s ON c.ID_ASISTENCIA = s.ID_SERVICIO
+      WHERE c.ID_MEDICO = ?
+    `, [medicoId]);
+    
+
+    res.json({ success: true, data: citas });
+  } catch (error) {
+    console.error("Error en GET /api/citas/medico:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Error al obtener citas",
+      error: error.message 
+    });
+  }
+});
+
+
 
 // Obtener todos los servicios disponibles 
 app.get("/api/servicios", async (req, res) => {
@@ -311,6 +355,16 @@ app.get("/api/servicios", async (req, res) => {
     }
   }
 });
+
+app.get("/api/servicios/:id", async (req, res) => {
+  try {
+    const [servicio] = await pool.query("SELECT * FROM servicios WHERE ID_SERVICIO = ?", [req.params.id]);
+    res.json(servicio[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Obtener médicos por servicio (versión mejorada)
 app.get("/api/medicos/servicio/:idServicio", async (req, res) => {
   let connection;
@@ -639,6 +693,7 @@ app.get("/historial/:idUsuario", async (req, res) => {
       SELECT 
         c.ID_CITA,
         CONCAT(u_m.Primer_Nombre, ' ', u_m.Primer_Apellido) AS Nombre_Medico,
+        c.ID_PACIENTE,
         CONCAT(u_p.Primer_Nombre, ' ', u_p.Primer_Apellido) AS Nombre_Paciente,
         c.Fecha_Hora,
         h.Diagnostico
@@ -676,6 +731,188 @@ app.get('/pacientes/:idUsuario', async (req, res) => {
     res.status(500).json({ message: 'Error en el servidor' });
   }
 });
+
+// Ruta para subir resultados (para administradores)
+app.post("/api/resultados", async (req, res) => {
+  let connection;
+  try {
+    const { ID_PACIENTE, ID_CITA, Descripcion, Documento_Examen } = req.body;
+
+    // Validaciones básicas
+    if (!ID_PACIENTE || !Descripcion || !Documento_Examen) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Faltan campos obligatorios" 
+      });
+    }
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    // Insertar el resultado
+    const [result] = await connection.query(
+      `INSERT INTO resultados 
+      (ID_PACIENTE, ID_CITA, Fecha_Registro, Descripcion, Documento_Examen) 
+      VALUES (?, ?, CURDATE(), ?, ?)`,
+      [ID_PACIENTE, ID_CITA || null, Descripcion, Documento_Examen]
+    );
+
+    await connection.commit();
+
+    res.status(201).json({
+      success: true,
+      message: "Resultado guardado exitosamente",
+      id: result.insertId
+    });
+
+  } catch (error) {
+    if (connection) await connection.rollback();
+    console.error("Error en /api/resultados:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Error al guardar el resultado",
+      error: error.message 
+    });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// Ruta para obtener resultados por paciente
+app.get("/api/resultados/:idPaciente", async (req, res) => {
+  try {
+    const { idPaciente } = req.params;
+
+    // Obtener resultados del paciente
+    const [resultados] = await pool.query(
+      `SELECT r.*, c.Fecha_Hora as Fecha_Cita
+       FROM resultados r
+       LEFT JOIN citas c ON r.ID_CITA = c.ID_CITA
+       WHERE r.ID_PACIENTE = ?
+       ORDER BY r.Fecha_Registro DESC`,
+      [idPaciente]
+    );
+
+    res.json({ 
+      success: true, 
+      count: resultados.length,
+
+      data: resultados 
+    });
+
+  } catch (error) {
+    console.error("Error en /api/resultados/:idPaciente:", error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message, 
+      data: []
+
+    });
+  }
+});
+
+// Ruta para manejar la subida de archivos PDF
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
+
+// Configuración mejorada de almacenamiento
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = path.join(__dirname, '..', 'file_storage'); // Sube un nivel y usa file_storage
+    
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true }); // Crea directorio si no existe
+    }
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueName = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}${path.extname(file.originalname)}`;
+    cb(null, uniqueName);
+  }
+});
+
+const upload = multer({
+  storage: storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    if (path.extname(file.originalname).toLowerCase() !== '.pdf') {
+      return cb(new Error('Solo se permiten archivos PDF'));
+    }
+    cb(null, true);
+  }
+});
+
+// Ruta modificada
+app.post('/api/upload-resultado', upload.single('documento'), async (req, res) => {
+  try {
+    if (!req.file) throw new Error('No se recibió archivo');
+    
+    const fileUrl = `${req.protocol}://${req.get('host')}/files/${req.file.filename}`;
+    
+    res.json({ 
+      success: true, 
+      filePath: fileUrl,
+      message: 'Archivo subido correctamente'
+    });
+  } catch (error) {
+    console.error('Error en upload:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
+// Servir archivos estáticos desde la carpeta uploads
+// En la ruta que sirve los archivos PDF
+app.use('/files', express.static(path.join(__dirname, '..', 'file_storage'), {
+  setHeaders: (res, path) => {
+    res.setHeader('Content-Disposition', 'attachment');
+  }
+}));
+
+// Obtener paciente por ID de usuario
+app.get('/api/pacientes/usuario/:idUsuario', async (req, res) => {
+  try {
+    const [paciente] = await pool.query(
+      `SELECT ID_PACIENTE FROM pacientes WHERE ID_USUARIO = ?`,
+      [req.params.idUsuario]
+    );
+    
+    if (!paciente.length) return res.status(404).json({ error: 'Paciente no encontrado' });
+    
+    res.json(paciente[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al obtener paciente' });
+  }
+});
+
+// Ruta actualizada para obtener resultados
+app.get("/api/resultados/:idPaciente", async (req, res) => {
+  try {
+    const [resultados] = await pool.query(`
+      SELECT 
+        r.*, 
+        c.Fecha_Hora as Fecha_Cita,
+        s.Nombre as Nombre_Servicio
+      FROM resultados r
+      LEFT JOIN citas c ON r.ID_CITA = c.ID_CITA
+      LEFT JOIN servicios s ON c.ID_SERVICIO = s.ID_SERVICIO
+      WHERE r.ID_PACIENTE = ?
+      ORDER BY r.Fecha_Registro DESC
+    `, [req.params.idPaciente]);
+
+    res.json(resultados);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al obtener resultados' });
+  }
+});
+
+
 
 // Manejo de errores y rutas no encontradas (DEBE IR AL FINAL)
 app.use((req, res, next) => {
