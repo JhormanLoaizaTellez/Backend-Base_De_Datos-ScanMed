@@ -313,11 +313,13 @@ app.get("/api/servicios", async (req, res) => {
     
     // Consulta con manejo explícito de errores
     const [servicios] = await connection.query(`
-      SELECT ID_SERVICIO as id, Nombre as nombre 
+      SELECT 
+        ID_SERVICIO AS id, 
+        Nombre AS nombre,
+        Precio AS precio
       FROM Servicios 
       ORDER BY Nombre
     `);
-    
     console.log(`📊 Resultados encontrados: ${servicios.length}`);
     
     if (!servicios || servicios.length === 0) {
@@ -356,12 +358,38 @@ app.get("/api/servicios", async (req, res) => {
   }
 });
 
-app.get("/api/servicios/:id", async (req, res) => {
+app.get("/api/servicios", async (req, res) => {
+  let connection;
   try {
-    const [servicio] = await pool.query("SELECT * FROM servicios WHERE ID_SERVICIO = ?", [req.params.id]);
-    res.json(servicio[0]);
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    
+    const [servicios] = await connection.query(`
+      SELECT ID_SERVICIO as id, Nombre as nombre, Precio as precio 
+      FROM Servicios 
+      ORDER BY Nombre
+    `);
+    
+    if (!servicios || servicios.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "No se encontraron servicios disponibles"
+      });
+    }
+    
+    res.json({ 
+      success: true, 
+      data: servicios
+    });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error("Error en /api/servicios:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Error interno al obtener servicios",
+      error: error.message
+    });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
@@ -732,6 +760,7 @@ app.get('/pacientes/:idUsuario', async (req, res) => {
   }
 });
 
+
 // Ruta para subir resultados (para administradores)
 app.post("/api/resultados", async (req, res) => {
   let connection;
@@ -808,6 +837,92 @@ app.get("/api/resultados/:idPaciente", async (req, res) => {
       data: []
 
     });
+  }
+});
+app.post("/api/pagos", async (req, res) => {
+  let connection;
+  try {
+    const {
+      ID_PACIENTE,
+      ID_SERVICIO,
+      monto,
+      metodo_pago,
+      estado,
+      transaccion_id
+    } = req.body;
+
+    // Validaciones básicas
+    if (!ID_PACIENTE || !ID_SERVICIO || !monto || !metodo_pago || !estado || !transaccion_id) {
+      return res.status(400).json({
+        success: false,
+        message: "Faltan campos obligatorios"
+      });
+    }
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    // Verificar si ID_PACIENTE existe
+    const [paciente] = await connection.query(
+      `SELECT ID_PACIENTE FROM Pacientes WHERE ID_PACIENTE = ?`,
+      [ID_PACIENTE]
+    );
+    if (!paciente.length) {
+      throw new Error("Paciente no encontrado");
+    }
+
+    // Verificar si ID_SERVICIO existe y obtener el precio
+    const [servicio] = await connection.query(
+      `SELECT ID_SERVICIO, Precio FROM Servicios WHERE ID_SERVICIO = ?`,
+      [ID_SERVICIO]
+    );
+    if (!servicio.length) {
+      throw new Error("Servicio no encontrado");
+    }
+
+    // Validar que el monto enviado coincida con el precio del servicio
+    if (parseFloat(monto).toFixed(2) !== parseFloat(servicio[0].Precio).toFixed(2)) {
+      throw new Error("El monto no coincide con el precio del servicio");
+    }
+
+    // Validar que el estado sea válido
+    const estadosValidos = ['PENDIENTE', 'COMPLETADO', 'RECHAZADO', 'REEMBOLSADO'];
+    if (!estadosValidos.includes(estado)) {
+      throw new Error("Estado de pago inválido");
+    }
+
+    // Insertar el pago
+    const [result] = await connection.query(
+      `INSERT INTO Pago (
+        ID_PACIENTE,
+        ID_SERVICIO,
+        Estado,
+        Metodo_Pago,
+        Transaccion_ID,
+        Monto
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+      [ID_PACIENTE, ID_SERVICIO, estado, metodo_pago, transaccion_id, monto]
+    );
+
+    await connection.commit();
+
+    res.json({
+      success: true,
+      message: "Pago registrado exitosamente",
+      pagoId: result.insertId,
+      transaccion_id: transaccion_id
+    });
+
+  } catch (error) {
+    if (connection) await connection.rollback();
+    console.error("Error en /api/pagos:", error);
+    res.status(500).json({
+      success: false,
+      message: `Error al registrar el pago: ${error.message}`,
+      error: error.message
+    });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
