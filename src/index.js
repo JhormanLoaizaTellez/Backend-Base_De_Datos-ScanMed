@@ -714,22 +714,25 @@ const fechaHoraStr = `${fechaSolo} ${horaFormateada}:00`;
 });
 
 // Reemplaza o añade este endpoint ANTES de tus middlewares de 404:
+// Modificar el endpoint para no incluir Observacion o usar un valor por defecto
 app.get("/historial/:idUsuario", async (req, res) => {
   const { idUsuario } = req.params;
   try {
     const [rows] = await pool.query(`
       SELECT 
         c.ID_CITA,
+        c.ID_MEDICO,
         CONCAT(u_m.Primer_Nombre, ' ', u_m.Primer_Apellido) AS Nombre_Medico,
         c.ID_PACIENTE,
         CONCAT(u_p.Primer_Nombre, ' ', u_p.Primer_Apellido) AS Nombre_Paciente,
         c.Fecha_Hora,
-        h.Diagnostico
+        h.Diagnostico,
+        NULL AS Observacion  -- Valor por defecto si la columna no existe
       FROM Historial_Consultas h
-      JOIN Citas c      ON h.ID_CITA    = c.ID_CITA
-      JOIN Medicos m    ON h.ID_MEDICO  = m.ID_MEDICO
+      JOIN Citas c ON h.ID_CITA = c.ID_CITA
+      JOIN Medicos m ON c.ID_MEDICO = m.ID_MEDICO
       JOIN Usuarios u_m ON m.ID_USUARIO = u_m.ID_USUARIO
-      JOIN Pacientes p  ON h.ID_PACIENTE= p.ID_PACIENTE
+      JOIN Pacientes p ON h.ID_PACIENTE = p.ID_PACIENTE
       JOIN Usuarios u_p ON p.ID_USUARIO = u_p.ID_USUARIO
       WHERE p.ID_USUARIO = ?
       ORDER BY c.Fecha_Hora DESC
@@ -738,7 +741,11 @@ app.get("/historial/:idUsuario", async (req, res) => {
     return res.json(rows);
   } catch (err) {
     console.error("Error en GET /historial/:idUsuario:", err);
-    return res.status(500).json({ success: false, message: "Error al obtener el historial" });
+    return res.status(500).json({ 
+      success: false, 
+      message: "Error al obtener el historial",
+      error: err.message
+    });
   }
 });
 
@@ -1026,6 +1033,180 @@ app.get("/api/resultados/:idPaciente", async (req, res) => {
     res.status(500).json({ error: 'Error al obtener resultados' });
   }
 });
+// Ruta para reprogramar citas
+app.put("/api/citas/:id/reprogramar", async (req, res) => {
+  let connection;
+  try {
+    const { id } = req.params;
+    const { nuevaFechaHora } = req.body;
+
+    if (!id || isNaN(id)) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "ID de cita no válido" 
+      });
+    }
+
+    if (!nuevaFechaHora || isNaN(new Date(nuevaFechaHora).getTime())) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Fecha y hora no válidas" 
+      });
+    }
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    try {
+      // 1. Verificar que la cita existe y está programada o confirmada
+      const [cita] = await connection.query(
+        `SELECT c.ID_CITA, c.ID_MEDICO, c.Fecha_Hora, c.ID_ESTADO 
+         FROM Citas c
+         WHERE c.ID_CITA = ?`,
+        [id]
+      );
+
+      if (cita.length === 0) {
+        return res.status(404).json({ 
+          success: false, 
+          message: "Cita no encontrada" 
+        });
+      }
+
+      if (cita[0].ID_ESTADO !== 1 && cita[0].ID_ESTADO !== 2) {
+        return res.status(400).json({ 
+          success: false, 
+          message: "Solo se pueden reprogramar citas programadas o confirmadas" 
+        });
+      }
+
+      // 2. Verificar que el médico no tenga otra cita en ese horario
+      const [citaExistente] = await connection.query(
+        `SELECT ID_CITA FROM Citas 
+         WHERE ID_MEDICO = ? 
+         AND Fecha_Hora = ?
+         AND ID_ESTADO IN (1, 2)
+         AND ID_CITA != ?
+         LIMIT 1`,
+        [cita[0].ID_MEDICO, nuevaFechaHora, id]
+      );
+
+      if (citaExistente.length > 0) {
+        return res.status(400).json({ 
+          success: false, 
+          message: "El médico ya tiene una cita programada en ese horario" 
+        });
+      }
+
+      // 3. Actualizar la fecha de la cita
+      await connection.query(
+        `UPDATE Citas SET Fecha_Hora = ? WHERE ID_CITA = ?`,
+        [nuevaFechaHora, id]
+      );
+
+      // 4. Actualizar el historial
+      await connection.query(
+        `UPDATE Historial_Consultas 
+         SET Diagnostico = 'Cita reprogramada - Pendiente de atención'
+         WHERE ID_CITA = ?`,
+        [id]
+      );
+
+      await connection.commit();
+
+      res.json({ 
+        success: true, 
+        message: "Cita reprogramada exitosamente",
+        nuevaFechaHora: nuevaFechaHora
+      });
+
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    }
+  } catch (error) {
+    console.error("Error en PUT /api/citas/:id/reprogramar:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Error al reprogramar la cita",
+      error: error.message 
+    });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+// Ruta para cancelar citas
+app.put("/api/citas/:id/cancelar", async (req, res) => {
+  let connection;
+  try {
+    const { id } = req.params;
+    
+    if (!id || isNaN(id)) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "ID de cita no válido" 
+      });
+    }
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    try {
+      // 1. Verificar que la cita existe y está en estado programado
+      const [cita] = await connection.query(
+        `SELECT ID_ESTADO FROM Citas WHERE ID_CITA = ?`,
+        [id]
+      );
+
+      if (cita.length === 0) {
+        return res.status(404).json({ 
+          success: false, 
+          message: "Cita no encontrada" 
+        });
+      }
+
+      if (cita[0].ID_ESTADO !== 1 && cita[0].ID_ESTADO !== 2) {
+        return res.status(400).json({ 
+          success: false, 
+          message: "Solo se pueden cancelar citas programadas o confirmadas" 
+        });
+      }
+
+      // 2. Actualizar estado de la cita a Cancelada (4)
+      await connection.query(
+        `UPDATE Citas SET ID_ESTADO = 4 WHERE ID_CITA = ?`,
+        [id]
+      );
+
+      // 3. Actualizar el diagnóstico en Historial_Consultas
+      await connection.query(
+        `UPDATE Historial_Consultas SET Diagnostico = 'Cita cancelada' 
+         WHERE ID_CITA = ?`,
+        [id]
+      );
+
+      await connection.commit();
+
+      res.json({ 
+        success: true, 
+        message: "Cita cancelada exitosamente" 
+      });
+
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    }
+  } catch (error) {
+    console.error("Error en PUT /api/citas/:id/cancelar:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Error al cancelar la cita",
+      error: error.message 
+    });
+  } finally {
+    if (connection) connection.release();
+  }
+});
 
 
 
@@ -1062,6 +1243,8 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`Servidor backend corriendo en http://localhost:${PORT}`);
 });
+
+
 
 module.exports = app;
 
