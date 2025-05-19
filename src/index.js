@@ -6,6 +6,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 require("dotenv").config();
 require('./recordatorios');  // Asegúrate de usar la ruta correcta
+const transporter = require('./mailer'); // <-- IMPORTANTE
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -793,11 +794,39 @@ app.post("/api/resultados", async (req, res) => {
       [ID_PACIENTE, ID_CITA || null, Descripcion, Documento_Examen]
     );
 
+    // Obtener correo y nombre del paciente
+    const [pacientes] = await connection.query(
+      `SELECT u.Correo_Electronico AS correo, 
+              CONCAT(u.Primer_Nombre, ' ', u.Primer_Apellido) AS nombre
+       FROM Pacientes p
+       JOIN Usuarios u ON p.ID_USUARIO = u.ID_USUARIO
+       WHERE p.ID_PACIENTE = ?`,
+      [ID_PACIENTE]
+    );
+
+    if (pacientes.length === 0) {
+      throw new Error("Paciente no encontrado");
+    }
+
+    const paciente = pacientes[0];
+
+    // Enviar correo de notificación
+    const mailOptions = {
+      from: 'scanmed21@gmail.com',
+      to: paciente.correo,
+      subject: 'Resultado de Examen Disponible',
+      text: `Hola ${paciente.nombre},\n\nTu resultado de examen ya está disponible.\nDescripción: ${Descripcion}\n\nPuedes consultarlo iniciando sesión en la plataforma.\n\nSaludos,\nEquipo Médico`
+    };
+
+    await transporter.sendMail(mailOptions);
+
+
+
     await connection.commit();
 
     res.status(201).json({
       success: true,
-      message: "Resultado guardado exitosamente",
+      message: "Resultado guardado y correo enviado",
       id: result.insertId
     });
 
@@ -806,7 +835,7 @@ app.post("/api/resultados", async (req, res) => {
     console.error("Error en /api/resultados:", error);
     res.status(500).json({ 
       success: false, 
-      message: "Error al guardar el resultado",
+      message: "Error al guardar el resultado o enviar correo",
       error: error.message 
     });
   } finally {
