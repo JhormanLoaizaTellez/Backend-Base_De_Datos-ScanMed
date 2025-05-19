@@ -6,6 +6,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 require("dotenv").config();
 require('./recordatorios');  // Asegúrate de usar la ruta correcta
+const transporter = require('./mailer'); // <-- IMPORTANTE
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -267,6 +268,79 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+// Agregar esta ruta después de la ruta de login
+app.get("/api/usuario/actual", async (req, res) => {
+  try {
+    // Obtener el token del header
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({ 
+        success: false, 
+        message: "No se proporcionó token de autenticación" 
+      });
+    }
+
+    // Verificar el token
+    const decoded = jwt.verify(token, 'secreto');
+    
+    // Obtener datos del usuario
+    const [usuario] = await pool.query(`
+      SELECT 
+        u.ID_USUARIO,
+        u.Primer_Nombre,
+        u.Segundo_Nombre,
+        u.Primer_Apellido,
+        u.Segundo_Apellido,
+        u.Num_Documento,
+        u.Correo_Electronico,
+        u.Telefono,
+        p.ID_PACIENTE
+      FROM Usuarios u
+      LEFT JOIN Pacientes p ON u.ID_USUARIO = p.ID_USUARIO
+      WHERE u.ID_USUARIO = ?
+    `, [decoded.id]);
+
+    if (usuario.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Usuario no encontrado" 
+      });
+    }
+
+    const userData = usuario[0];
+    
+    res.json({
+      success: true,
+      data: {
+        id: userData.ID_USUARIO,
+        primerNombre: userData.Primer_Nombre,
+        segundoNombre: userData.Segundo_Nombre,
+        primerApellido: userData.Primer_Apellido,
+        segundoApellido: userData.Segundo_Apellido,
+        documento: userData.Num_Documento,
+        correo: userData.Correo_Electronico,
+        telefono: userData.Telefono,
+        idPaciente: userData.ID_PACIENTE
+      }
+    });
+
+  } catch (error) {
+    console.error("Error en /api/usuario/actual:", error);
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({ 
+        success: false, 
+        message: "Token inválido" 
+      });
+    }
+    res.status(500).json({ 
+      success: false, 
+      message: "Error al obtener datos del usuario",
+      error: error.message 
+    });
+  }
+});
+
 // En tu archivo de rutas del backend (ej: server.js)
 app.get("/api/citas/medico/:medicoId", async (req, res) => {
   try {
@@ -317,6 +391,10 @@ app.get("/api/servicios", async (req, res) => {
         ID_SERVICIO AS id, 
         Nombre AS nombre,
         Precio AS precio
+      SELECT 
+        ID_SERVICIO AS id, 
+        Nombre AS nombre,
+        Precio AS precio
       FROM Servicios 
       ORDER BY Nombre
     `);
@@ -355,6 +433,41 @@ app.get("/api/servicios", async (req, res) => {
       console.log("🔌 Liberando conexión a la base de datos");
       connection.release();
     }
+  }
+});
+
+app.get("/api/servicios", async (req, res) => {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    
+    const [servicios] = await connection.query(`
+      SELECT ID_SERVICIO as id, Nombre as nombre, Precio as precio 
+      FROM Servicios 
+      ORDER BY Nombre
+    `);
+    
+    if (!servicios || servicios.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "No se encontraron servicios disponibles"
+      });
+    }
+    
+    res.json({ 
+      success: true, 
+      data: servicios
+    });
+  } catch (error) {
+    console.error("Error en /api/servicios:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Error interno al obtener servicios",
+      error: error.message
+    });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
@@ -415,102 +528,99 @@ app.get("/api/medicos/servicio/:idServicio", async (req, res) => {
 app.get("/api/disponibilidad/:idMedico", async (req, res) => {
   try {
     const { idMedico } = req.params;
-    
+
     // Validar ID
     if (!idMedico || isNaN(idMedico)) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "ID de médico no válido" 
+      return res.status(400).json({
+        success: false,
+        message: "ID de médico no válido"
       });
     }
 
     // Obtener citas existentes del médico
     const [citas] = await pool.query(`
-      SELECT Fecha_Hora 
-      FROM Citas 
-      WHERE ID_MEDICO = ? 
+      SELECT Fecha_Hora
+      FROM Citas
+      WHERE ID_MEDICO = ?
       AND ID_ESTADO IN (1, 2) /* Programada o Confirmada */
       AND DATE(Fecha_Hora) >= CURDATE()
     `, [idMedico]);
 
-    // Generar disponibilidad para las próximas 2 semanas
+    // Generar disponibilidad
     const disponibilidad = generarDisponibilidad(citas);
-    
-    res.json({ 
-      success: true, 
+
+    res.json({
+      success: true,
       data: disponibilidad,
       message: "Disponibilidad obtenida correctamente"
     });
   } catch (error) {
     console.error("Error en /api/disponibilidad:", error);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: "Error al obtener disponibilidad",
-      error: error.message 
+      error: error.message
     });
   }
 });
-
 // Función para generar horarios disponibles
-// Función para generar horarios disponibles (versión corregida)
+
 function generarDisponibilidad(citasExistentes) {
-  const diasLaborales = [1, 2, 3, 4, 5]; // Lunes(1) a Viernes(5)
+  const diasLaborales = [1, 2, 3, 4, 5]; // Lunes a viernes
   const horarios = [];
-  const hoy = new Date();
-  
-  // Ajustar hora local sin tiempo (para comparación exacta)
-  hoy.setHours(0, 0, 0, 0);
-  
-  // Convertir citas existentes a formato comparable (manejo de zona horaria)
+
+  // Convertir citas existentes a formato comparable
   const citasOcupadas = citasExistentes.map(c => {
     const fecha = new Date(c.Fecha_Hora);
-    // Ajustar a fecha local sin zona horaria
-    const fechaLocal = new Date(fecha.getTime() - fecha.getTimezoneOffset() * 60000);
-    return {
-      fecha: fechaLocal.toISOString().split('T')[0],
-      hora: fechaLocal.getHours().toString().padStart(2, '0') + ':00'
-    };
+    return new Date(
+      fecha.getFullYear(),
+      fecha.getMonth(),
+      fecha.getDate(),
+      fecha.getHours(),
+      0, 0, 0
+    ).getTime();
   });
 
-  // Generar disponibilidad para los próximos 14 días (incluyendo hoy si es día laboral)
+  // Generar disponibilidad para los próximos 14 días
+  const hoy = new Date();
+  hoy.setHours(0, 0, 0, 0); // Normalizar a medianoche
+
   for (let i = 0; i < 14; i++) {
     const fecha = new Date(hoy);
     fecha.setDate(hoy.getDate() + i);
-    
+
+    // Verificar que el día sea laborable (lunes a viernes)
     if (diasLaborales.includes(fecha.getDay())) {
-      const fechaStr = fecha.toISOString().split('T')[0];
+      console.log(`Generando disponibilidad para ${fecha.toISOString().split('T')[0]} (día ${fecha.getDay()})`);
       
-      // Horario de mañana (7-11)
+      // Horario de mañana (7:00 - 11:00)
       for (let h = 7; h < 12; h++) {
-        const horaActual = new Date(fecha);
-        horaActual.setHours(h, 0, 0, 0);
-        
-        // Solo agregar horarios futuros (incluyendo el momento actual)
-        if (horaActual >= new Date()) {
-          const horaStr = h.toString().padStart(2, '0') + ':00';
-          
-          if (!citasOcupadas.some(c => c.fecha === fechaStr && c.hora === horaStr)) {
+        const slot = new Date(fecha);
+        slot.setHours(h, 0, 0, 0);
+
+        if (slot > new Date()) {
+          const slotTime = slot.getTime();
+          if (!citasOcupadas.includes(slotTime)) {
             horarios.push({
-              fecha: fechaStr,
-              hora: horaStr,
+              fecha: fecha.toISOString().split('T')[0],
+              hora: `${h.toString().padStart(2, '0')}:00`,
               disponible: true
             });
           }
         }
       }
-      
-      // Horario de tarde (14-17)
+
+      // Horario de tarde (14:00 - 17:00)
       for (let h = 14; h < 18; h++) {
-        const horaActual = new Date(fecha);
-        horaActual.setHours(h, 0, 0, 0);
-        
-        if (horaActual >= new Date()) {
-          const horaStr = h.toString().padStart(2, '0') + ':00';
-          
-          if (!citasOcupadas.some(c => c.fecha === fechaStr && c.hora === horaStr)) {
+        const slot = new Date(fecha);
+        slot.setHours(h, 0, 0, 0);
+
+        if (slot > new Date()) {
+          const slotTime = slot.getTime();
+          if (!citasOcupadas.includes(slotTime)) {
             horarios.push({
-              fecha: fechaStr,
-              hora: horaStr,
+              fecha: fecha.toISOString().split('T')[0],
+              hora: `${h.toString().padStart(2, '0')}:00`,
               disponible: true
             });
           }
@@ -518,120 +628,107 @@ function generarDisponibilidad(citasExistentes) {
       }
     }
   }
-  
+
+  console.log(`Total horarios generados: ${horarios.length}`);
   return horarios;
 }
 
 // Crear nueva cita
-// Crear nueva cita - Versión corregida
 app.post("/api/citas", async (req, res) => {
   let connection;
   try {
-    const { 
-      nombre, apellidos, documento, correo,
-      servicioId, doctorId, fecha, hora
-    } = req.body;
-
-    // Validaciones
-    if (!nombre || !apellidos || !documento || !correo || 
-        !servicioId || !doctorId || !fecha || !hora) {
-      return res.status(400).json({ 
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) {
+      return res.status(401).json({ 
         success: false, 
-        message: "Todos los campos son obligatorios" 
+        message: "No autorizado" 
       });
     }
 
-// Formatear hora con seguridad
-let [h, m] = hora.split(':');
-h = h.padStart(2, '0');
-m = (m || '00').padStart(2, '0');
-const horaFormateada = `${h}:${m}`;
+    const decoded = jwt.verify(token, 'secreto');
+    
+    const [usuario] = await pool.query(
+      `SELECT u.ID_USUARIO, p.ID_PACIENTE 
+       FROM Usuarios u
+       LEFT JOIN Pacientes p ON u.ID_USUARIO = p.ID_USUARIO
+       WHERE u.ID_USUARIO = ?`,
+      [decoded.id]
+    );
 
-const fechaSolo = fecha.split(' ')[0];
+    if (usuario.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Usuario no encontrado" 
+      });
+    }
 
+    if (!usuario[0].ID_PACIENTE) {
+      return res.status(400).json({
+        success: false,
+        message: "El usuario no está registrado como paciente"
+      });
+    }
 
-const fechaHoraStr = `${fechaSolo} ${horaFormateada}:00`;
+    const { 
+      servicioId, 
+      doctorId, 
+      fecha, 
+      hora 
+    } = req.body;
 
+    // Validar datos
+    if (!servicioId || !doctorId || !fecha || !hora) {
+      return res.status(400).json({
+        success: false,
+        message: "Faltan datos obligatorios"
+      });
+    }
+
+    let [h, m] = hora.split(':');
+    h = h.padStart(2, '0');
+    m = (m || '00').padStart(2, '0');
+    const horaFormateada = `${h}:${m}`;
+    const fechaSolo = fecha.split(' ')[0];
+    const fechaHoraStr = `${fechaSolo} ${horaFormateada}:00`;
 
     connection = await pool.getConnection();
     await connection.beginTransaction();
 
     try {
-      // 1. Verificar que el usuario existe
-      const [usuario] = await connection.query(
-        `SELECT ID_USUARIO FROM Usuarios WHERE Num_Documento = ? LIMIT 1`,
-        [documento]
-      );
-  
-      if (usuario.length === 0) {
-        return res.status(404).json({ 
-          success: false, 
-          message: "Usuario no registrado. Por favor complete su registro primero."
-        });
-      }
-  
-      // 2. Verificar que el correo coincide con el usuario
-      const [usuarioCorreo] = await connection.query(
-        `SELECT ID_USUARIO FROM Usuarios WHERE Num_Documento = ? AND Correo_Electronico = ? LIMIT 1`,
-        [documento, correo]
-      );
-  
-      if (usuarioCorreo.length === 0) {
-        return res.status(400).json({ 
-          success: false, 
-          message: "El correo no coincide con el usuario registrado."
-        });
-      }
-
-      // 3. Buscar o crear registro en Pacientes
-      const [paciente] = await connection.query(
-        `SELECT ID_PACIENTE FROM Pacientes WHERE ID_USUARIO = ? LIMIT 1`,
-        [usuario[0].ID_USUARIO]
-      );
-  
-      let idPaciente;
-      if (paciente.length > 0) {
-        idPaciente = paciente[0].ID_PACIENTE;
-      } else {
-        // Solo crea el registro en Pacientes (no en Usuarios)
-        const [nuevoPaciente] = await connection.query(
-          `INSERT INTO Pacientes (ID_USUARIO) VALUES (?)`,
-          [usuario[0].ID_USUARIO]
-        );
-        idPaciente = nuevoPaciente.insertId;
-      }
-
-      // 4. Verificar disponibilidad del horario
       const [citaExistente] = await connection.query(
         `SELECT ID_CITA FROM Citas 
          WHERE ID_MEDICO = ? 
          AND Fecha_Hora = ?
          AND ID_ESTADO IN (1, 2)
-         LIMIT 1`,
+         LIMIT 1 FOR UPDATE`,
         [doctorId, fechaHoraStr]
       );
 
       if (citaExistente.length > 0) {
-        throw new Error("El horario seleccionado ya está reservado");
+        await connection.rollback();
+        return res.status(400).json({ 
+          success: false, 
+          message: "El horario seleccionado ya está reservado",
+          code: "TIME_SLOT_TAKEN"
+        });
       }
 
-      // 5. Crear la cita
+      // Insertar cita con ID_ASISTENCIA por defecto (1 = Asiste)
       const [nuevaCita] = await connection.query(
         `INSERT INTO Citas (
           ID_ESTADO, ID_PACIENTE, ID_MEDICO, ID_ASISTENCIA, Fecha_Hora
         ) VALUES (?, ?, ?, ?, ?)`,
-        [2, idPaciente, doctorId, 1, fechaHoraStr]
+        [2, usuario[0].ID_PACIENTE, doctorId, 1, fechaHoraStr]
       );
 
-      // 6. Crear registro en Historial_Consultas
+      // Crear registro en Historial_Consultas
       await connection.query(
         `INSERT INTO Historial_Consultas (
           ID_PACIENTE, ID_MEDICO, ID_CITA, Diagnostico
         ) VALUES (?, ?, ?, ?)`,
-        [idPaciente, doctorId, nuevaCita.insertId, "Cita programada - Pendiente de atención"]
+        [usuario[0].ID_PACIENTE, doctorId, nuevaCita.insertId, "Cita programada - Pendiente de atención"]
       );
 
-      // Obtener detalles para la respuesta
       const [medico] = await connection.query(
         `SELECT u.Primer_Nombre, u.Primer_Apellido 
          FROM Medicos m
@@ -645,6 +742,13 @@ const fechaHoraStr = `${fechaSolo} ${horaFormateada}:00`;
         [servicioId]
       );
 
+      const [pacienteData] = await connection.query(
+        `SELECT Primer_Nombre, Primer_Apellido 
+         FROM Usuarios 
+         WHERE ID_USUARIO = ?`,
+        [decoded.id]
+      );
+
       await connection.commit();
 
       return res.json({ 
@@ -652,9 +756,10 @@ const fechaHoraStr = `${fechaSolo} ${horaFormateada}:00`;
         message: "Cita reservada exitosamente",
         data: {
           citaId: nuevaCita.insertId,
+          idPaciente: usuario[0].ID_PACIENTE,
           fecha: fecha,
           hora: horaFormateada,
-          paciente: `${nombre} ${apellidos}`,
+          paciente: `${pacienteData[0].Primer_Nombre} ${pacienteData[0].Primer_Apellido}`,
           medico: `${medico[0].Primer_Nombre} ${medico[0].Primer_Apellido}`,
           servicio: servicio[0].Nombre
         }
@@ -667,18 +772,64 @@ const fechaHoraStr = `${fechaSolo} ${horaFormateada}:00`;
     }
   } catch (error) {
     console.error("Error en /api/citas:", error);
-    return res.status(500).json({ 
+    return res.status(error.name === 'JsonWebTokenError' ? 401 : 500).json({ 
       success: false, 
-      message: error.message || "Error al procesar la reserva"
+      message: error.name === 'JsonWebTokenError' ? "Token inválido" : "Error al procesar la reserva",
+      error: error.message
     });
   } finally {
-    if (connection) {
-      connection.release();
+    if (connection) connection.release();
+  }
+});
+// Obtener paciente por número de documento
+app.get("/api/pacientes/documento/:documento", async (req, res) => {
+  try {
+    const { documento } = req.params;
+    
+    // Validar formato del documento (eliminar espacios, guiones)
+    const documentoLimpio = documento.toString().replace(/\D/g, '');
+    
+    const [paciente] = await pool.query(`
+      SELECT 
+        p.ID_PACIENTE, 
+        p.ID_USUARIO,
+        u.Primer_Nombre,
+        u.Primer_Apellido,
+        u.Num_Documento
+      FROM Pacientes p
+      JOIN Usuarios u ON p.ID_USUARIO = u.ID_USUARIO
+      WHERE REPLACE(u.Num_Documento, '-', '') = ?
+      LIMIT 1
+    `, [documentoLimpio]);
+
+    if (paciente.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Paciente no encontrado. Verifique el documento o complete su registro.",
+        code: "PATIENT_NOT_FOUND"
+      });
     }
+
+    res.json({ 
+      success: true,
+      data: {
+        idPaciente: paciente[0].ID_PACIENTE,
+        idUsuario: paciente[0].ID_USUARIO,
+        documento: paciente[0].Num_Documento,
+        nombreCompleto: `${paciente[0].Primer_Nombre} ${paciente[0].Primer_Apellido}`
+      }
+    });
+  } catch (error) {
+    console.error("Error en /api/pacientes/documento:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Error al buscar paciente",
+      error: error.message,
+      code: "SERVER_ERROR"
+    });
   }
 });
 
-// Reemplaza o añade este endpoint ANTES de tus middlewares de 404:
 // Modificar el endpoint para no incluir Observacion o usar un valor por defecto
 app.get("/historial/:idUsuario", async (req, res) => {
   const { idUsuario } = req.params;
@@ -713,9 +864,6 @@ app.get("/historial/:idUsuario", async (req, res) => {
     });
   }
 });
-
-
-
 
 
 app.get('/pacientes/:idUsuario', async (req, res) => {
@@ -758,11 +906,37 @@ app.post("/api/resultados", async (req, res) => {
       [ID_PACIENTE, ID_CITA || null, Descripcion, Documento_Examen]
     );
 
+    // Obtener correo y nombre del paciente
+    const [pacientes] = await connection.query(
+      `SELECT u.Correo_Electronico AS correo, 
+              CONCAT(u.Primer_Nombre, ' ', u.Primer_Apellido) AS nombre
+       FROM Pacientes p
+       JOIN Usuarios u ON p.ID_USUARIO = u.ID_USUARIO
+       WHERE p.ID_PACIENTE = ?`,
+      [ID_PACIENTE]
+    );
+
+    if (pacientes.length === 0) {
+      throw new Error("Paciente no encontrado");
+    }
+
+    const paciente = pacientes[0];
+
+    // Enviar correo de notificación
+    const mailOptions = {
+      from: 'scanmed21@gmail.com',
+      to: paciente.correo,
+      subject: 'Resultado de Examen Disponible',
+      text: `Hola ${paciente.nombre},\n\nTu resultado de examen ya está disponible.\nDescripción: ${Descripcion}\n\nPuedes consultarlo iniciando sesión en la plataforma.\n\nSaludos,\nEquipo Médico`
+    };
+
+    await transporter.sendMail(mailOptions);
+
     await connection.commit();
 
     res.status(201).json({
       success: true,
-      message: "Resultado guardado exitosamente",
+      message: "Resultado guardado y correo enviado",
       id: result.insertId
     });
 
@@ -771,7 +945,7 @@ app.post("/api/resultados", async (req, res) => {
     console.error("Error en /api/resultados:", error);
     res.status(500).json({ 
       success: false, 
-      message: "Error al guardar el resultado",
+      message: "Error al guardar el resultado o enviar correo",
       error: error.message 
     });
   } finally {
@@ -814,83 +988,193 @@ app.get("/api/resultados/:idPaciente", async (req, res) => {
 app.post("/api/pagos", async (req, res) => {
   let connection;
   try {
+    console.log('Datos recibidos en /api/pagos:', req.body);
     const {
-      ID_PACIENTE,
-      ID_SERVICIO,
+      pacienteId,
+      servicioId,
+      citaId,
+      metodoPago,
+      transaccionId,
       monto,
-      metodo_pago,
-      estado,
-      transaccion_id
+      detalles,
+      estado = 'COMPLETADO'
     } = req.body;
 
-    // Validaciones básicas
-    if (!ID_PACIENTE || !ID_SERVICIO || !monto || !metodo_pago || !estado || !transaccion_id) {
+    const requiredFields = ['pacienteId', 'servicioId', 'metodoPago', 'transaccionId', 'monto'];
+    const missingFields = requiredFields.filter(field => !req.body[field]);
+    if (missingFields.length > 0) {
       return res.status(400).json({
         success: false,
-        message: "Faltan campos obligatorios"
+        message: `Faltan campos obligatorios: ${missingFields.join(', ')}`
+      });
+    }
+
+    const validMethods = ['TARJETA', 'PAYPAL', 'BANCOLOMBIA', 'NEQUI'];
+    if (!validMethods.includes(metodoPago.toUpperCase())) {
+      return res.status(400).json({
+        success: false,
+        message: `Método de pago no válido. Valores permitidos: ${validMethods.join(', ')}`
+      });
+    }
+
+    const validEstados = ['PENDIENTE', 'COMPLETADO', 'RECHAZADO', 'REEMBOLSADO'];
+    if (!validEstados.includes(estado.toUpperCase())) {
+      return res.status(400).json({
+        success: false,
+        message: `Estado no válido. Valores permitidos: ${validEstados.join(', ')}`
       });
     }
 
     connection = await pool.getConnection();
     await connection.beginTransaction();
 
-    // Verificar si ID_PACIENTE existe
     const [paciente] = await connection.query(
       `SELECT ID_PACIENTE FROM Pacientes WHERE ID_PACIENTE = ?`,
-      [ID_PACIENTE]
+      [pacienteId]
     );
-    if (!paciente.length) {
-      throw new Error("Paciente no encontrado");
+    if (paciente.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Paciente no encontrado"
+      });
     }
 
-    // Verificar si ID_SERVICIO existe y obtener el precio
     const [servicio] = await connection.query(
       `SELECT ID_SERVICIO, Precio FROM Servicios WHERE ID_SERVICIO = ?`,
-      [ID_SERVICIO]
+      [servicioId]
     );
-    if (!servicio.length) {
-      throw new Error("Servicio no encontrado");
+    if (servicio.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Servicio no encontrado"
+      });
     }
 
-    // Validar que el monto enviado coincida con el precio del servicio
-    if (parseFloat(monto).toFixed(2) !== parseFloat(servicio[0].Precio).toFixed(2)) {
-      throw new Error("El monto no coincide con el precio del servicio");
+    if (citaId) {
+      const [cita] = await connection.query(
+        `SELECT ID_CITA FROM Citas WHERE ID_CITA = ? AND ID_PACIENTE = ?`,
+        [citaId, pacienteId]
+      );
+      if (cita.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Cita no encontrada o no pertenece al paciente"
+        });
+      }
     }
 
-    // Validar que el estado sea válido
-    const estadosValidos = ['PENDIENTE', 'COMPLETADO', 'RECHAZADO', 'REEMBOLSADO'];
-    if (!estadosValidos.includes(estado)) {
-      throw new Error("Estado de pago inválido");
-    }
-
-    // Insertar el pago
     const [result] = await connection.query(
       `INSERT INTO Pago (
-        ID_PACIENTE,
-        ID_SERVICIO,
-        Estado,
-        Metodo_Pago,
-        Transaccion_ID,
-        Monto
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-      [ID_PACIENTE, ID_SERVICIO, estado, metodo_pago, transaccion_id, monto]
+        ID_PACIENTE, ID_SERVICIO, ID_CITA, Estado, Metodo_Pago,
+        Transaccion_ID, Monto, Detalles, Fecha_Pago
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [
+        pacienteId,
+        servicioId,
+        citaId || null,
+        estado.toUpperCase(),
+        metodoPago.toUpperCase(),
+        transaccionId,
+        monto,
+        detalles || `Pago realizado mediante ${metodoPago}`
+      ]
+    );
+
+    if (citaId) {
+      // Actualizar solo el estado de la cita, sin ID_PAGO
+      await connection.query(
+        `UPDATE Citas SET ID_ESTADO = 2 WHERE ID_CITA = ?`,
+        [citaId]
+      );
+    }
+
+    await connection.commit();
+
+    return res.json({
+      success: true,
+      message: "Pago registrado exitosamente",
+      data: {
+        pagoId: result.insertId,
+        transaccionId: transaccionId,
+        fecha: new Date().toISOString()
+      }
+    });
+
+  } catch (error) {
+    if (connection) {
+      console.error("Error en la transacción de pago:", {
+        message: error.message,
+        sqlMessage: error.sqlMessage,
+        stack: error.stack
+      });
+      await connection.rollback();
+    }
+    return res.status(500).json({
+      success: false,
+      message: `Error al procesar el pago: ${error.message}`,
+      sqlError: error.sqlMessage || 'N/A'
+    });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+app.post("/api/facturas", async (req, res) => {
+  let connection;
+  try {
+    const {
+      pagoId,
+      pacienteId,
+      numeroFactura,
+      total,
+      servicioId,
+      descripcion,
+      cantidad
+    } = req.body;
+
+    // Validar datos
+    const requiredFields = ['pagoId', 'pacienteId', 'numeroFactura', 'total', 'servicioId', 'descripcion', 'cantidad'];
+    const missingFields = requiredFields.filter(field => !req.body[field]);
+    if (missingFields.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Faltan campos obligatorios: ${missingFields.join(', ')}`
+      });
+    }
+
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    // Insertar factura
+    const [facturaResult] = await connection.query(
+      `INSERT INTO Factura (ID_PAGO, ID_PACIENTE, Fecha_Pago, Numero_Factura, Total, Estado)
+       VALUES (?, ?, NOW(), ?, ?, 'PAGADA')`,
+      [pagoId, pacienteId, numeroFactura, total]
+    );
+
+    // Insertar detalle de factura
+    const [detalleResult] = await connection.query(
+      `INSERT INTO Factura_Detalle (ID_FACTURA, ID_SERVICIO, Descripcion, Cantidad)
+       VALUES (?, ?, ?, ?)`,
+      [facturaResult.insertId, servicioId, descripcion, cantidad]
     );
 
     await connection.commit();
 
-    res.json({
+    return res.json({
       success: true,
-      message: "Pago registrado exitosamente",
-      pagoId: result.insertId,
-      transaccion_id: transaccion_id
+      message: "Factura generada exitosamente",
+      data: {
+        facturaId: facturaResult.insertId,
+        numeroFactura: numeroFactura
+      }
     });
 
   } catch (error) {
     if (connection) await connection.rollback();
-    console.error("Error en /api/pagos:", error);
-    res.status(500).json({
+    console.error("Error en /api/facturas:", error);
+    return res.status(500).json({
       success: false,
-      message: `Error al registrar el pago: ${error.message}`,
+      message: "Error al generar factura",
       error: error.message
     });
   } finally {
@@ -898,6 +1182,92 @@ app.post("/api/pagos", async (req, res) => {
   }
 });
 
+// Obtener factura por ID_PAGO
+app.get("/api/facturas/pago/:pagoId", async (req, res) => {
+  try {
+    const { pagoId } = req.params;
+
+    const [factura] = await pool.query(`
+      SELECT 
+        f.ID_FACTURA,
+        f.ID_PAGO,
+        f.ID_PACIENTE,
+        f.Fecha_Pago,
+        f.Numero_Factura,
+        f.Total,
+        f.Estado,
+        u.Primer_Nombre,
+        u.Primer_Apellido,
+        u.Num_Documento,
+        u.Correo_Electronico,
+        pg.Metodo_Pago,  -- Corregido: Cambiado de p.Metodo_Pago a pg.Metodo_Pago
+        pg.Transaccion_ID,
+        s.Nombre as Nombre_Servicio,
+        (f.Total / 1.19) as Subtotal,
+        (f.Total - (f.Total / 1.19)) as IVA
+      FROM Factura f
+      JOIN Pacientes p ON f.ID_PACIENTE = p.ID_PACIENTE
+      JOIN Usuarios u ON p.ID_USUARIO = u.ID_USUARIO
+      JOIN Pago pg ON f.ID_PAGO = pg.ID_PAGO
+      JOIN Servicios s ON pg.ID_SERVICIO = s.ID_SERVICIO
+      WHERE f.ID_PAGO = ?
+    `, [pagoId]);
+
+    if (factura.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Factura no encontrada"
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: factura[0]
+    });
+
+  } catch (error) {
+    console.error("Error en /api/facturas/pago:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error al obtener factura",
+      error: error.message
+    });
+  }
+});
+
+// Obtener detalles de factura
+app.get("/api/facturas/:facturaId/detalles", async (req, res) => {
+  try {
+    const { facturaId } = req.params;
+
+    const [detalles] = await pool.query(`
+      SELECT 
+        fd.ID_FACTURADETALLE,
+        fd.ID_FACTURA,
+        fd.ID_SERVICIO,
+        fd.Descripcion,
+        fd.Cantidad,
+        s.Precio as Precio_Unitario,
+        (s.Precio * fd.Cantidad) as Subtotal
+      FROM Factura_Detalle fd
+      JOIN Servicios s ON fd.ID_SERVICIO = s.ID_SERVICIO
+      WHERE fd.ID_FACTURA = ?
+    `, [facturaId]);
+
+    return res.json({
+      success: true,
+      data: detalles
+    });
+
+  } catch (error) {
+    console.error("Error en /api/facturas/:facturaId/detalles:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error al obtener detalles de factura",
+      error: error.message
+    });
+  }
+});
 // Ruta para manejar la subida de archivos PDF
 const path = require('path');
 const fs = require('fs');
@@ -961,19 +1331,48 @@ app.use('/files', express.static(path.join(__dirname, '..', 'file_storage'), {
 }));
 
 // Obtener paciente por ID de usuario
-app.get('/api/pacientes/usuario/:idUsuario', async (req, res) => {
+app.get("/api/pagos/paciente/:idPaciente", async (req, res) => {
   try {
-    const [paciente] = await pool.query(
-      `SELECT ID_PACIENTE FROM pacientes WHERE ID_USUARIO = ?`,
-      [req.params.idUsuario]
-    );
+    const { idPaciente } = req.params;
     
-    if (!paciente.length) return res.status(404).json({ error: 'Paciente no encontrado' });
-    
-    res.json(paciente[0]);
+    // Validar ID
+    if (!idPaciente || isNaN(idPaciente)) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "ID de paciente no válido" 
+      });
+    }
+
+    const [pagos] = await pool.query(`
+      SELECT 
+        p.ID_PAGO,
+        p.Fecha_Pago,
+        p.Metodo_Pago,
+        p.Monto,
+        p.Estado,
+        p.Transaccion_ID,
+        s.Nombre AS Servicio,
+        c.Fecha_Hora AS Fecha_Cita
+      FROM Pago p
+      JOIN Servicios s ON p.ID_SERVICIO = s.ID_SERVICIO
+      LEFT JOIN Citas c ON p.ID_CITA = c.ID_CITA
+      WHERE p.ID_PACIENTE = ?
+      ORDER BY p.Fecha_Pago DESC
+    `, [idPaciente]);
+
+    res.json({ 
+      success: true, 
+      data: pagos,
+      count: pagos.length
+    });
+
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Error al obtener paciente' });
+    console.error("Error en /api/pagos/paciente/:idPaciente:", error);
+    res.status(500).json({ 
+      success: false, 
+      message: "Error al obtener historial de pagos",
+      error: error.message 
+    });
   }
 });
 
@@ -1099,6 +1498,7 @@ app.put("/api/citas/:id/reprogramar", async (req, res) => {
   } finally {
     if (connection) connection.release();
   }
+  
 });
 // Ruta para cancelar citas
 app.put("/api/citas/:id/cancelar", async (req, res) => {
