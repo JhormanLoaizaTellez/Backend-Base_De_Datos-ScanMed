@@ -268,7 +268,7 @@ app.post("/api/login", async (req, res) => {
 
     // 3b) ¿Es médico?
     const [medRows] = await pool.query(
-      "SELECT m.ID_MEDICO, m.ID_ESPECIALIDAD FROM medicos m WHERE m.ID_USUARIO = ?",
+      "SELECT m.ID_MEDICO, m.ID_SERVICIO FROM medicos m WHERE m.ID_USUARIO = ?",
       [usuario.ID_USUARIO]
     );
     if (medRows.length > 0) {
@@ -291,7 +291,7 @@ app.post("/api/login", async (req, res) => {
         role: "MEDICO",
         medico: {
           medicoId: medRows[0].ID_MEDICO,
-          especialidadId: medRows[0].ID_ESPECIALIDAD,
+          especialidadId: medRows[0].ID_SERVICIO,
         },
       });
     }
