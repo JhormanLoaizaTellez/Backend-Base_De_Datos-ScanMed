@@ -947,6 +947,21 @@ app.post("/api/resultados", async (req, res) => {
     if (connection) connection.release();
   }
 });
+app.get('/api/pacientes/usuario/:idUsuario', async (req, res) => {
+  try {
+    const [paciente] = await pool.query(
+      `SELECT ID_PACIENTE FROM pacientes WHERE ID_USUARIO = ?`,
+      [req.params.idUsuario]
+    );
+    
+    if (!paciente.length) return res.status(404).json({ error: 'Paciente no encontrado' });
+    
+    res.json(paciente[0]);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al obtener paciente' });
+  }
+});
 
 // Ruta para obtener resultados por paciente
 app.get("/api/resultados/:idPaciente", async (req, res) => {
@@ -1607,8 +1622,3 @@ app.listen(PORT, () => {
 
 
 module.exports = app;
-
-
-
-
-
