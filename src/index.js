@@ -210,7 +210,10 @@ if (userExists.length > 0) {
 app.post("/api/login", async (req, res) => {
   try {
     const { correo, contrasena } = req.body;
+    console.log(`Intento de login con correo: ${correo}`);
+
     if (!correo || !contrasena) {
+      console.warn("Campos incompletos en la solicitud");
       return res
         .status(400)
         .json({
@@ -221,32 +224,38 @@ app.post("/api/login", async (req, res) => {
 
     // 1) Buscar usuario
     const [users] = await pool.query(
-      "SELECT * FROM usuarios WHERE Correo_Electronico = ?",
+      "SELECT * FROM Usuarios WHERE Correo_Electronico = ?",
       [correo]
     );
+    console.log(`Resultado de búsqueda de usuario: ${users.length} encontrado(s)`);
     if (users.length === 0) {
+      console.warn(`Usuario no encontrado para correo: ${correo}`);
       return res
         .status(401)
-        .json({ success: false, message: "Usuario no encontrado." });
+        .json({ success: false, message: "Usuario no encontrado.", code: "USER_NOT_FOUND" });
     }
     const usuario = users[0];
+    console.log(`Usuario encontrado: ID=${usuario.ID_USUARIO}, Tipo_Usuario=${usuario.Tipo_Usuario}`);
 
     // 2) Validar contraseña
     const match = await bcrypt.compare(contrasena, usuario.Contrasena);
     if (!match) {
+      console.warn(`Contraseña incorrecta para correo: ${correo}`);
       return res
         .status(401)
-        .json({ success: false, message: "Contraseña incorrecta." });
+        .json({ success: false, message: "Contraseña incorrecta.", code: "INVALID_PASSWORD" });
     }
+    console.log("Contraseña validada correctamente");
 
     // 3) Determinar rol consultando tablas especializadas
     // 3a) ¿Es administrador?
     const [adminRows] = await pool.query(
-      "SELECT ID_ADMINISTRADOR FROM administradores WHERE ID_USUARIO = ?",
+      "SELECT ID_ADMINISTRADOR FROM Administradores WHERE ID_USUARIO = ?",
       [usuario.ID_USUARIO]
     );
+    console.log(`Administradores encontrados: ${adminRows.length}`);
     if (adminRows.length > 0) {
-      // Es administrador
+      console.log(`Usuario es ADMINISTRADOR, ID_ADMINISTRADOR=${adminRows[0].ID_ADMINISTRADOR}`);
       const token = jwt.sign(
         {
           id: usuario.ID_USUARIO,
@@ -269,11 +278,12 @@ app.post("/api/login", async (req, res) => {
 
     // 3b) ¿Es médico?
     const [medRows] = await pool.query(
-      "SELECT m.ID_MEDICO, m.ID_ESPECIALIDAD FROM medicos m WHERE m.ID_USUARIO = ?",
+      "SELECT m.ID_MEDICO, m.ID_SERVICIO FROM Medicos m WHERE m.ID_USUARIO = ?",
       [usuario.ID_USUARIO]
     );
+    console.log(`Médicos encontrados: ${medRows.length}`);
     if (medRows.length > 0) {
-      // Es médico
+      console.log(`Usuario es MEDICO, ID_MEDICO=${medRows[0].ID_MEDICO}`);
       const token = jwt.sign(
         {
           id: usuario.ID_USUARIO,
@@ -292,12 +302,13 @@ app.post("/api/login", async (req, res) => {
         role: "MEDICO",
         medico: {
           medicoId: medRows[0].ID_MEDICO,
-          especialidadId: medRows[0].ID_ESPECIALIDAD,
+          servicioId: medRows[0].ID_SERVICIO,
         },
       });
     }
 
     // 3c) Si no es ni admin ni médico, será paciente
+    console.log("Usuario es PACIENTE");
     const token = jwt.sign(
       {
         id: usuario.ID_USUARIO,
@@ -518,7 +529,7 @@ app.get("/api/medicos/servicio/:idServicio", async (req, res) => {
         u.Segundo_Nombre,
         u.Primer_Apellido, 
         u.Segundo_Apellido,
-        s.Nombre as Especialidad
+        s.Nombre as Servicios
       FROM Medicos m
       JOIN Usuarios u ON m.ID_USUARIO = u.ID_USUARIO
       JOIN Servicios s ON m.ID_SERVICIO = s.ID_SERVICIO
@@ -550,6 +561,78 @@ app.get("/api/medicos/servicio/:idServicio", async (req, res) => {
     if (connection) connection.release();
   }
 });
+app.get("/api/usuario/actual", async (req, res) => {
+  try {
+    // Obtener el token del header
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({ 
+        success: false, 
+        message: "No se proporcionó token de autenticación" 
+      });
+    }
+
+    // Verificar el token
+    const decoded = jwt.verify(token, 'secreto');
+    
+    // Obtener datos del usuario
+    const [usuario] = await pool.query(`
+      SELECT 
+        u.ID_USUARIO,
+        u.Primer_Nombre,
+        u.Segundo_Nombre,
+        u.Primer_Apellido,
+        u.Segundo_Apellido,
+        u.Num_Documento,
+        u.Correo_Electronico,
+        u.Telefono,
+        p.ID_PACIENTE
+      FROM Usuarios u
+      LEFT JOIN Pacientes p ON u.ID_USUARIO = p.ID_USUARIO
+      WHERE u.ID_USUARIO = ?
+    `, [decoded.id]);
+
+    if (usuario.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Usuario no encontrado" 
+      });
+    }
+
+    const userData = usuario[0];
+    
+    res.json({
+      success: true,
+      data: {
+        id: userData.ID_USUARIO,
+        primerNombre: userData.Primer_Nombre,
+        segundoNombre: userData.Segundo_Nombre,
+        primerApellido: userData.Primer_Apellido,
+        segundoApellido: userData.Segundo_Apellido,
+        documento: userData.Num_Documento,
+        correo: userData.Correo_Electronico,
+        telefono: userData.Telefono,
+        idPaciente: userData.ID_PACIENTE
+      }
+    });
+
+  } catch (error) {
+    console.error("Error en /api/usuario/actual:", error);
+    if (error.name === 'JsonWebTokenError') {
+      return res.status(401).json({ 
+        success: false, 
+        message: "Token inválido" 
+      });
+    }
+    res.status(500).json({ 
+      success: false, 
+      message: "Error al obtener datos del usuario",
+      error: error.message 
+    });
+  }
+});
+
 // Obtener disponibilidad de un médico
 app.get("/api/disponibilidad/:idMedico", async (req, res) => {
   try {
@@ -1612,8 +1695,6 @@ app.put("/api/citas/:id/cancelar", async (req, res) => {
     if (connection) connection.release();
   }
 });
-
-
 
 // Manejo de errores y rutas no encontradas (DEBE IR AL FINAL)
 app.use((req, res, next) => {
