@@ -9,6 +9,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@stripe/react-stripe-js": "^3.7.0",
+    "@stripe/stripe-js": "^7.3.0",
     "axios": "^1.8.4",
     "bcrypt": "^5.1.1",
     "bcryptjs": "^3.0.2",
@@ -21,8 +23,10 @@
     "mysql2": "^3.14.0",
     "node-cron": "^3.0.3",
     "nodemailer": "^6.10.1",
+    "path": "^0.12.7",
     "promise-mysql": "^5.2.0",
-    "save-dev": "^0.0.1-security"
+    "save-dev": "^0.0.1-security",
+    "stripe": "^18.1.0"
   },
   "devDependencies": {
     "morgan": "^1.10.0",
