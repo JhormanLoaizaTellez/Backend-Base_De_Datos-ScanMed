@@ -340,10 +340,21 @@ app.post("/api/login", async (req, res) => {
 
 // GET all users
 app.get("/api/usuarios", async (req, res) => {
-  const [rows] = await pool.query(
-    "SELECT ID_USUARIO AS id, CONCAT(Primer_Nombre,' ',Primer_Apellido) AS nombre, Correo_Electronico AS email, Tipo_Usuario AS role FROM usuarios"
-  );
-  res.json({ success: true, data: rows });
+  try {
+    const [rows] = await pool.query(`
+      SELECT 
+        ID_USUARIO AS id, 
+        CONCAT(Primer_Nombre, ' ', Primer_Apellido) AS nombre, 
+        Correo_Electronico AS email, 
+        Num_Documento AS identificacion,
+        Tipo_Usuario AS role 
+      FROM usuarios
+    `);
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error("Error en /api/usuarios:", error);
+    res.status(500).json({ success: false, message: "Error al obtener usuarios" });
+  }
 });
 
 // PUT change user role
@@ -473,46 +484,23 @@ app.get("/api/servicios", async (req, res) => {
   }
 });
 
-app.get("/api/servicios", async (req, res) => {
-  let connection;
+app.get("/api/servicios/:id", async (req, res) => {
   try {
-    connection = await pool.getConnection();
-    await connection.beginTransaction();
-    
-    const [servicios] = await connection.query(`
-      SELECT ID_SERVICIO as id, Nombre as nombre, Precio as precio 
-      FROM Servicios 
-      ORDER BY Nombre
-    `);
-    
-    if (!servicios || servicios.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        message: "No se encontraron servicios disponibles"
-      });
-    }
-    
-    res.json({ 
-      success: true, 
-      data: servicios
-    });
+    const [servicio] = await pool.query("SELECT * FROM servicios WHERE ID_SERVICIO = ?", [req.params.id]);
+    res.json(servicio[0]);
   } catch (error) {
-    console.error("Error en /api/servicios:", error);
-    res.status(500).json({ 
-      success: false, 
-      message: "Error interno al obtener servicios",
-      error: error.message
-    });
-  } finally {
-    if (connection) connection.release();
+    res.status(500).json({ error: error.message });
   }
 });
+
 
 // Obtener médicos por servicio (versión mejorada)
 app.get("/api/medicos/servicio/:idServicio", async (req, res) => {
   let connection;
   try {
     const { idServicio } = req.params;
+      console.log("ID Servicio recibido:", idServicio);
+
     
     if (!idServicio || isNaN(idServicio)) {
       return res.status(400).json({ 
@@ -561,6 +549,37 @@ app.get("/api/medicos/servicio/:idServicio", async (req, res) => {
     if (connection) connection.release();
   }
 });
+
+app.get("/api/medicos", async (req, res) => {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [medicos] = await connection.query(`
+      SELECT 
+        m.ID_MEDICO, 
+        u.Primer_Nombre, 
+        u.Segundo_Nombre,
+        u.Primer_Apellido, 
+        u.Segundo_Apellido,
+        s.Nombre as Servicios
+      FROM Medicos m
+      JOIN Usuarios u ON m.ID_USUARIO = u.ID_USUARIO
+      JOIN Servicios s ON m.ID_SERVICIO = s.ID_SERVICIO
+      ORDER BY u.Primer_Apellido, u.Primer_Nombre
+    `);
+
+    res.json({
+      success: true,
+      data: medicos,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: "Error al obtener médicos" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 app.get("/api/usuario/actual", async (req, res) => {
   try {
     // Obtener el token del header
@@ -1695,6 +1714,55 @@ app.put("/api/citas/:id/cancelar", async (req, res) => {
     if (connection) connection.release();
   }
 });
+
+app.get("/api/medicos", async (req, res) => {
+  let connection;
+  try {
+    const { especialidad } = req.query;
+    connection = await pool.getConnection();
+
+    let query = `
+      SELECT 
+        m.ID_MEDICO,
+        u.Primer_Nombre,
+        u.Segundo_Nombre,
+        u.Primer_Apellido,
+        u.Segundo_Apellido,
+        s.Nombre AS especialidad
+      FROM Medicos m
+      JOIN Usuarios u ON m.ID_USUARIO = u.ID_USUARIO
+      JOIN Servicios s ON m.ID_SERVICIO = s.ID_SERVICIO
+    `;
+
+    const params = [];
+
+    if (especialidad) {
+      query += ` WHERE s.Nombre = ?`;
+      params.push(especialidad);
+    }
+
+    query += ` ORDER BY u.Primer_Apellido, u.Primer_Nombre`;
+
+    const [medicos] = await connection.query(query, params);
+
+    const data = medicos.map(m => ({
+      id: m.ID_MEDICO,
+      nombre: `${m.Primer_Nombre} ${m.Segundo_Nombre || ""} ${m.Primer_Apellido} ${m.Segundo_Apellido}`.trim(),
+      especialidad: m.especialidad,
+      horarios: "No especificado"
+    }));
+
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("Error al obtener médicos:", err.message, err.stack);
+    res.status(500).json({ success: false, message: "Error al obtener médicos", error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+
+
 
 // Manejo de errores y rutas no encontradas (DEBE IR AL FINAL)
 app.use((req, res, next) => {
