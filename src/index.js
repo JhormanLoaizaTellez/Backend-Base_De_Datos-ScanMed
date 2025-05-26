@@ -4,9 +4,12 @@ const morgan = require("morgan");
 const mysql = require("mysql2/promise");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const PDFDocument = require("pdfkit");
+const fs = require("fs");
+const path = require("path");
 require("dotenv").config();
-require('./recordatorios');  // Asegúrate de usar la ruta correcta
-const transporter = require('./mailer'); // <-- IMPORTANTE
+require("./recordatorios");
+const transporter = require("./mailer");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -340,10 +343,21 @@ app.post("/api/login", async (req, res) => {
 
 // GET all users
 app.get("/api/usuarios", async (req, res) => {
-  const [rows] = await pool.query(
-    "SELECT ID_USUARIO AS id, CONCAT(Primer_Nombre,' ',Primer_Apellido) AS nombre, Correo_Electronico AS email, Tipo_Usuario AS role FROM usuarios"
-  );
-  res.json({ success: true, data: rows });
+  try {
+    const [rows] = await pool.query(`
+      SELECT 
+        ID_USUARIO AS id, 
+        CONCAT(Primer_Nombre, ' ', Primer_Apellido) AS nombre, 
+        Correo_Electronico AS email, 
+        Num_Documento AS identificacion,
+        Tipo_Usuario AS role 
+      FROM usuarios
+    `);
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error("Error en /api/usuarios:", error);
+    res.status(500).json({ success: false, message: "Error al obtener usuarios" });
+  }
 });
 
 // PUT change user role
@@ -473,46 +487,23 @@ app.get("/api/servicios", async (req, res) => {
   }
 });
 
-app.get("/api/servicios", async (req, res) => {
-  let connection;
+app.get("/api/servicios/:id", async (req, res) => {
   try {
-    connection = await pool.getConnection();
-    await connection.beginTransaction();
-    
-    const [servicios] = await connection.query(`
-      SELECT ID_SERVICIO as id, Nombre as nombre, Precio as precio 
-      FROM Servicios 
-      ORDER BY Nombre
-    `);
-    
-    if (!servicios || servicios.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        message: "No se encontraron servicios disponibles"
-      });
-    }
-    
-    res.json({ 
-      success: true, 
-      data: servicios
-    });
+    const [servicio] = await pool.query("SELECT * FROM servicios WHERE ID_SERVICIO = ?", [req.params.id]);
+    res.json(servicio[0]);
   } catch (error) {
-    console.error("Error en /api/servicios:", error);
-    res.status(500).json({ 
-      success: false, 
-      message: "Error interno al obtener servicios",
-      error: error.message
-    });
-  } finally {
-    if (connection) connection.release();
+    res.status(500).json({ error: error.message });
   }
 });
+
 
 // Obtener médicos por servicio (versión mejorada)
 app.get("/api/medicos/servicio/:idServicio", async (req, res) => {
   let connection;
   try {
     const { idServicio } = req.params;
+      console.log("ID Servicio recibido:", idServicio);
+
     
     if (!idServicio || isNaN(idServicio)) {
       return res.status(400).json({ 
@@ -561,6 +552,37 @@ app.get("/api/medicos/servicio/:idServicio", async (req, res) => {
     if (connection) connection.release();
   }
 });
+
+app.get("/api/medicos", async (req, res) => {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [medicos] = await connection.query(`
+      SELECT 
+        m.ID_MEDICO, 
+        u.Primer_Nombre, 
+        u.Segundo_Nombre,
+        u.Primer_Apellido, 
+        u.Segundo_Apellido,
+        s.Nombre as Servicios
+      FROM Medicos m
+      JOIN Usuarios u ON m.ID_USUARIO = u.ID_USUARIO
+      JOIN Servicios s ON m.ID_SERVICIO = s.ID_SERVICIO
+      ORDER BY u.Primer_Apellido, u.Primer_Nombre
+    `);
+
+    res.json({
+      success: true,
+      data: medicos,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ success: false, message: "Error al obtener médicos" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 app.get("/api/usuario/actual", async (req, res) => {
   try {
     // Obtener el token del header
@@ -1392,8 +1414,6 @@ app.get("/api/facturas/:facturaId/detalles", async (req, res) => {
   }
 });
 // Ruta para manejar la subida de archivos PDF
-const path = require('path');
-const fs = require('fs');
 const multer = require('multer');
 
 // Configuración mejorada de almacenamiento
@@ -1693,6 +1713,543 @@ app.put("/api/citas/:id/cancelar", async (req, res) => {
     });
   } finally {
     if (connection) connection.release();
+  }
+});
+
+app.get("/api/medicos", async (req, res) => {
+  let connection;
+  try {
+    const { especialidad } = req.query;
+    connection = await pool.getConnection();
+
+    let query = `
+      SELECT 
+        m.ID_MEDICO,
+        u.Primer_Nombre,
+        u.Segundo_Nombre,
+        u.Primer_Apellido,
+        u.Segundo_Apellido,
+        s.Nombre AS especialidad
+      FROM Medicos m
+      JOIN Usuarios u ON m.ID_USUARIO = u.ID_USUARIO
+      JOIN Servicios s ON m.ID_SERVICIO = s.ID_SERVICIO
+    `;
+
+    const params = [];
+
+    if (especialidad) {
+      query += ` WHERE s.Nombre = ?`;
+      params.push(especialidad);
+    }
+
+    query += ` ORDER BY u.Primer_Apellido, u.Primer_Nombre`;
+
+    const [medicos] = await connection.query(query, params);
+
+    const data = medicos.map(m => ({
+      id: m.ID_MEDICO,
+      nombre: `${m.Primer_Nombre} ${m.Segundo_Nombre || ""} ${m.Primer_Apellido} ${m.Segundo_Apellido}`.trim(),
+      especialidad: m.especialidad,
+      horarios: "No especificado"
+    }));
+
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error("Error al obtener médicos:", err.message, err.stack);
+    res.status(500).json({ success: false, message: "Error al obtener médicos", error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+// Ruta para obtener todos los exámenes realizados
+app.get("/api/examenes", async (req, res) => {
+  try {
+    const { paciente, tipoExamen, fechaInicio, fechaFin } = req.query;
+    let query = `
+      SELECT 
+        r.ID_RESULTADO,
+        r.Fecha_Registro,
+        r.Descripcion,
+        r.Documento_Examen,
+        s.Nombre AS Tipo_Examen,
+        CONCAT(u_p.Primer_Nombre, ' ', u_p.Primer_Apellido) AS Nombre_Paciente,
+        CONCAT(u_m.Primer_Nombre, ' ', u_m.Primer_Apellido) AS Nombre_Medico,
+        c.Fecha_Hora AS Fecha_Cita
+      FROM Resultados r
+      JOIN Citas c ON r.ID_CITA = c.ID_CITA
+      JOIN Pacientes p ON r.ID_PACIENTE = p.ID_PACIENTE
+      JOIN Usuarios u_p ON p.ID_USUARIO = u_p.ID_USUARIO
+      JOIN Medicos m ON c.ID_MEDICO = m.ID_MEDICO
+      JOIN Usuarios u_m ON m.ID_USUARIO = u_m.ID_USUARIO
+      JOIN Servicios s ON m.ID_SERVICIO = s.ID_SERVICIO
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (paciente) {
+      query += ` AND CONCAT(u_p.Primer_Nombre, ' ', u_p.Primer_Apellido) LIKE ?`;
+      params.push(`%${paciente}%`);
+    }
+    if (tipoExamen) {
+      query += ` AND s.Nombre LIKE ?`;
+      params.push(`%${tipoExamen}%`);
+    }
+    if (fechaInicio) {
+      query += ` AND r.Fecha_Registro >= ?`;
+      params.push(fechaInicio);
+    }
+    if (fechaFin) {
+      query += ` AND r.Fecha_Registro <= ?`;
+      params.push(fechaFin);
+    }
+
+    query += ` ORDER BY r.Fecha_Registro DESC`;
+
+    const [examenes] = await pool.query(query, params);
+
+    res.json({
+      success: true,
+      data: examenes,
+      count: examenes.length
+    });
+  } catch (error) {
+    console.error("Error en /api/examenes:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error al obtener exámenes",
+      error: error.message
+    });
+  }
+});
+
+// Ruta para obtener todas las facturas y estadísticas
+app.get("/api/facturas", async (req, res) => {
+  try {
+    const { paciente, estado, fechaInicio, fechaFin, metodoPago, medico } = req.query;
+    let query = `
+      SELECT 
+        f.ID_FACTURA,
+        f.Fecha_Pago,
+        f.Numero_Factura,
+        f.Total,
+        f.Estado,
+        CONCAT(u.Primer_Nombre, ' ', u.Primer_Apellido) AS Nombre_Paciente,
+        CONCAT(u_m.Primer_Nombre, ' ', u_m.Primer_Apellido) AS Nombre_Medico,
+        p.Metodo_Pago,
+        p.Transaccion_ID
+      FROM Factura f
+      JOIN Pago p ON f.ID_PAGO = p.ID_PAGO
+      JOIN Pacientes pa ON f.ID_PACIENTE = pa.ID_PACIENTE
+      JOIN Usuarios u ON pa.ID_USUARIO = u.ID_USUARIO
+      JOIN Citas c ON p.ID_CITA = c.ID_CITA
+      JOIN Medicos m ON c.ID_MEDICO = m.ID_MEDICO
+      JOIN Usuarios u_m ON m.ID_USUARIO = u_m.ID_USUARIO
+      WHERE 1=1
+    `;
+    const params = [];
+
+    if (paciente) {
+      query += ` AND CONCAT(u.Primer_Nombre, ' ', u.Primer_Apellido) LIKE ?`;
+      params.push(`%${paciente}%`);
+    }
+    if (estado) {
+      query += ` AND f.Estado = ?`;
+      params.push(estado);
+    }
+    if (fechaInicio) {
+      query += ` AND f.Fecha_Pago >= ?`;
+      params.push(fechaInicio);
+    }
+    if (fechaFin) {
+      query += ` AND f.Fecha_Pago <= ?`;
+      params.push(fechaFin);
+    }
+    if (metodoPago) {
+      query += ` AND p.Metodo_Pago = ?`;
+      params.push(metodoPago);
+    }
+    if (medico) {
+      query += ` AND CONCAT(u_m.Primer_Nombre, ' ', u_m.Primer_Apellido) LIKE ?`;
+      params.push(`%${medico}%`);
+    }
+
+    query += ` ORDER BY f.Fecha_Pago DESC`;
+
+    const [facturas] = await pool.query(query, params);
+
+    // Estadísticas
+    const [stats] = await pool.query(`
+      SELECT 
+        COUNT(*) AS Total_Facturas,
+        SUM(Total) AS Ingresos_Totales,
+        SUM(CASE WHEN Estado = 'PAGADA' THEN Total ELSE 0 END) AS Ingresos_Pagados,
+        SUM(CASE WHEN Estado = 'EMITIDA' THEN Total ELSE 0 END) AS Ingresos_Pendientes,
+        SUM(CASE WHEN Estado = 'ANULADA' THEN Total ELSE 0 END) AS Ingresos_Anulados
+      FROM Factura
+    `);
+
+    res.json({
+      success: true,
+      data: facturas,
+      count: facturas.length,
+      statistics: stats[0]
+    });
+  } catch (error) {
+    console.error("Error en /api/facturas:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error al obtener facturas",
+      error: error.message
+    });
+  }
+});
+app.post("/api/generate-pdf", async (req, res) => {
+  try {
+    console.log("Procesando solicitud para generar PDF:", req.body);
+    const { data, type } = req.body;
+
+    if (!data || !Array.isArray(data) || data.length === 0 || !type) {
+      return res.status(400).json({
+        success: false,
+        message: "Datos inválidos o tipo no especificado",
+      });
+    }
+
+    // Initialize PDF document
+    const doc = new PDFDocument({
+      size: "A4",
+      margin: 40,
+      info: {
+        Title: type === "facturas" ? "Sesiones de Facturación" : "Historial de Exámenes",
+        Author: "ScanMed",
+        CreationDate: new Date(),
+      },
+    });
+
+    const buffers = [];
+    doc.on("data", buffers.push.bind(buffers));
+    doc.on("end", () => {
+      console.log("PDF generado, enviando respuesta");
+      const pdfData = Buffer.concat(buffers);
+      // Save PDF to disk for debugging
+      const debugPath = path.join(__dirname, "debug_output.pdf");
+      fs.writeFileSync(debugPath, pdfData);
+      console.log(`PDF guardado en ${debugPath} para depuración`);
+      res.status(200);
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename=${
+          type === "facturas" ? "Sesiones_Facturacion.pdf" : "Historial_Examenes.pdf"
+        }`
+      );
+      res.send(pdfData);
+    });
+
+    // Helper function to add header
+    const addHeader = () => {
+      const logoPath = path.join(__dirname, "logo.png");
+      if (fs.existsSync(logoPath)) {
+        console.log("Logo encontrado, añadiendo al PDF");
+        doc.image(logoPath, 40, 20, { width: 100 });
+      } else {
+        console.log("Logo no encontrado, usando texto ScanMed");
+        doc
+          .font("Helvetica-Bold")
+          .fontSize(16)
+          .fillColor("#003087")
+          .text("ScanMed", 40, 30);
+      }
+
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(20)
+        .fillColor("#003087")
+        .text(
+          type === "facturas" ? "Sesiones de Facturación" : "Historial de Exámenes",
+          0,
+          30,
+          { align: "center" }
+        );
+
+      doc
+        .font("Helvetica")
+        .fontSize(10)
+        .fillColor("#333333")
+        .text(`Generado el: ${new Date().toLocaleDateString()}`, 0, 60, {
+          align: "center",
+        });
+
+      doc
+        .moveTo(40, 80)
+        .lineTo(550, 80)
+        .strokeColor("#CCCCCC")
+        .stroke();
+    };
+
+    // Helper function to add footer
+    const addFooter = (pageNumber) => {
+      doc
+        .font("Helvetica")
+        .fontSize(8)
+        .fillColor("#666666")
+        .text(
+          `Página ${pageNumber} | ScanMed © ${new Date().getFullYear()}`,
+          40,
+          doc.page.height - 50,
+          { align: "center" }
+        );
+    };
+
+    // Add header to first page
+    addHeader();
+    let pageNumber = 1;
+    addFooter(pageNumber);
+
+    // Add test text to verify rendering
+    doc
+      .font("Helvetica")
+      .fontSize(12)
+      .fillColor("#000000")
+      .opacity(1)
+    console.log("Texto de prueba añadido en y=90");
+
+    // Define table headers and data based on type
+    let headers, rows;
+    if (type === "facturas") {
+      headers = [
+        "ID",
+        "Fecha",
+        "Nº Factura",
+        "Paciente",
+        "Médico",
+        "Total",
+        "Estado",
+        "Método Pago",
+        "Transacción ID",
+      ];
+      rows = data.map((f, index) => {
+        console.log(`Procesando factura ${index + 1}:`, f);
+        const total = Number(f.Total);
+        if (isNaN(total)) {
+          console.warn(
+            `Valor no numérico encontrado en Total para factura ${f.ID_FACTURA}: ${f.Total}`
+          );
+          return [
+            f.ID_FACTURA.toString(),
+            new Date(f.Fecha_Pago).toLocaleDateString(),
+            f.Numero_Factura,
+            f.Nombre_Paciente,
+            f.Nombre_Medico,
+            "$0.00",
+            f.Estado,
+            f.Metodo_Pago,
+            f.Transaccion_ID,
+          ];
+        }
+        return [
+          f.ID_FACTURA.toString(),
+          new Date(f.Fecha_Pago).toLocaleDateString(),
+          f.Numero_Factura,
+          f.Nombre_Paciente,
+          f.Nombre_Medico,
+          `$${total.toFixed(2)}`,
+          f.Estado,
+          f.Metodo_Pago,
+          f.Transaccion_ID,
+        ];
+      });
+    } else if (type === "examenes") {
+      headers = ["ID", "Fecha", "Paciente", "Médico", "Tipo Examen", "Descripción"];
+      rows = data.map((e, index) => {
+        console.log(`Procesando examen ${index + 1}:`, e);
+        return [
+          e.ID_RESULTADO.toString(),
+          new Date(e.Fecha_Registro).toLocaleDateString(),
+          e.Nombre_Paciente,
+          e.Nombre_Medico,
+          e.Tipo_Examen,
+          e.Descripcion,
+        ];
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: "Tipo de reporte no soportado",
+      });
+    }
+
+    console.log("Filas generadas:", rows);
+
+    // Calculate dynamic column widths based on content
+    const calculateColumnWidths = (headers, rows) => {
+      const minWidth = 50;
+      const maxWidth = 150;
+      const totalWidth = 510; // Ajustado para A4 con márgenes
+      const colWidths = headers.map((header, i) => {
+        const maxContentLength = Math.max(
+          header.length,
+          ...rows.map((row) => (row[i] || "").toString().length)
+        );
+        return Math.min(Math.max(minWidth, maxContentLength * 8), maxWidth);
+      });
+
+      // Adjust widths to fit within totalWidth
+      const totalCalculatedWidth = colWidths.reduce((sum, w) => sum + w, 0);
+      if (totalCalculatedWidth > totalWidth) {
+        const scaleFactor = totalWidth / totalCalculatedWidth;
+        return colWidths.map((w) => Math.floor(w * scaleFactor));
+      }
+      return colWidths;
+    };
+
+    // Table configuration
+    const colWidths = calculateColumnWidths(headers, rows);
+    console.log("Anchos de columnas:", colWidths);
+    const startX = 40;
+    let y = 120; // Ajustado para dejar espacio al texto de prueba
+    const rowHeight = 25;
+    const headerHeight = 30;
+
+    // Draw table headers with background
+    doc
+      .rect(40, y, colWidths.reduce((sum, w) => sum + w, 0), headerHeight)
+      .fillColor("#E6F3FA")
+      .fill();
+
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(10)
+      .fillColor("#003087")
+      .opacity(1);
+    headers.forEach((header, i) => {
+      doc.text(
+        header,
+        startX + colWidths.slice(0, i).reduce((sum, w) => sum + w, 0),
+        y + 8,
+        {
+          width: colWidths[i],
+          align: "left",
+        }
+      );
+    });
+
+    y += headerHeight;
+    doc
+      .moveTo(startX, y)
+      .lineTo(startX + colWidths.reduce((sum, w) => sum + w, 0), y)
+      .strokeColor("#CCCCCC")
+      .stroke();
+
+    // Draw table rows
+    doc
+      .font("Helvetica")
+      .fontSize(9)
+      .fillColor("#000000") // Negro explícito
+      .opacity(1); // Opacidad completa
+    rows.forEach((row, rowIndex) => {
+      console.log(`Dibujando fila ${rowIndex + 1} en y=${y}:`, row);
+
+      // Check if we need a new page
+      if (y + rowHeight > doc.page.height - 80) {
+        console.log("Añadiendo nueva página en fila", rowIndex + 1);
+        doc.addPage();
+        y = 100;
+        pageNumber++;
+        addHeader();
+        addFooter(pageNumber);
+
+        // Redraw headers on new page
+        doc
+          .rect(40, y, colWidths.reduce((sum, w) => sum + w, 0), headerHeight)
+          .fillColor("#E6F3FA")
+          .fill();
+        doc
+          .font("Helvetica-Bold")
+          .fontSize(10)
+          .fillColor("#003087")
+          .opacity(1);
+        headers.forEach((header, i) => {
+          doc.text(
+            header,
+            startX + colWidths.slice(0, i).reduce((sum, w) => sum + w, 0),
+            y + 8,
+            {
+              width: colWidths[i],
+              align: "left",
+            }
+          );
+        });
+        y += headerHeight;
+        doc
+          .moveTo(startX, y)
+          .lineTo(startX + colWidths.reduce((sum, w) => sum + w, 0), y)
+          .strokeColor("#CCCCCC")
+          .stroke();
+      }
+
+      // Draw row background
+      if (rowIndex % 2 === 0) {
+        doc
+          .rect(40, y, colWidths.reduce((sum, w) => sum + w, 0), rowHeight)
+          .fillColor("#F9F9F9")
+          .fill();
+      }
+
+      // Draw row cells
+      doc
+        .font("Helvetica")
+        .fontSize(9)
+        .fillColor("#000000")
+        .opacity(1);
+      row.forEach((cell, i) => {
+        const text = cell != null ? cell.toString() : "";
+        const xPos = startX + colWidths.slice(0, i).reduce((sum, w) => sum + w, 0);
+        console.log(`Dibujando celda ${i} en x=${xPos}, y=${y + 5}: ${text}`);
+        doc.text(text, xPos, y + 5, {
+          width: colWidths[i],
+          align: "left",
+        });
+      });
+
+      y += rowHeight;
+      doc
+        .moveTo(startX, y)
+        .lineTo(startX + colWidths.reduce((sum, w) => sum + w, 0), y)
+        .strokeColor("#CCCCCC")
+        .stroke();
+    });
+
+    // Draw table borders
+    const tableWidth = colWidths.reduce((sum, w) => sum + w, 0);
+    let currentX = startX;
+    colWidths.forEach((width) => {
+      doc
+        .moveTo(currentX, 120)
+        .lineTo(currentX, y)
+        .strokeColor("#CCCCCC")
+        .stroke();
+      currentX += width;
+    });
+    doc
+      .moveTo(startX, 120)
+      .lineTo(startX, y)
+      .stroke();
+    doc
+      .moveTo(startX + tableWidth, 120)
+      .lineTo(startX + tableWidth, y)
+      .stroke();
+
+    // Finalize PDF
+    console.log("Finalizando PDF");
+    doc.end();
+  } catch (error) {
+    console.error("Error en /api/generate-pdf:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error al generar PDF",
+      error: error.message,
+    });
   }
 });
 
